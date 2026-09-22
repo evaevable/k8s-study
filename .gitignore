@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 本地实验产物
+*.log
+kubeconfig*.yaml
+!cases/**/kubeconfig*.yaml
+
+# 临时目录
+tmp/
+.tmp/

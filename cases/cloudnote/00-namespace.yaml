@@ -1,0 +1,10 @@
+# CloudNote 的命名空间
+# 作用：给这个案例的所有资源一个逻辑隔离的"抽屉"，方便一键清理
+# 对应章节：第 1 章（概念引入）/ 第 8 章（详细讲解 Namespace）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+    app.kubernetes.io/managed-by: k8s-study
