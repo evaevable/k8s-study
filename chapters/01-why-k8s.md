@@ -252,7 +252,7 @@ flowchart TB
     API <-->|"② 持久化对象状态"| ETCD
     API -->|"③ watch 到 Pending 的 Pod"| SCH
     SCH -->|"④ 绑定：这个 Pod 去 Node-1"| API
-    CM -->|"⑤ watch 并比对 | 发现只有 1 个副本 → 补建"| API
+    CM -->|"⑤ watch 并比对，发现副本不足就补建"| API
     API -->|"⑥ watch 分配到自己的 Pod"| KL1
     API -->|"⑥ watch 分配到自己的 Pod"| KL2
     KL1 --> CR1 --> POD1
