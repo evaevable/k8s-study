@@ -17,7 +17,8 @@
 
 | 文件 | 内容 | 对应章节 |
 |---|---|---|
-| `00-namespace.yaml` | 命名空间 `cloudnote` | 第 8 章 |
+| `00-namespace.yaml` | 命名空间 `cloudnote` | 第 2 章（前置）/ 第 8 章（详解） |
+| `15-pod-demo.yaml` | 三容器裸 Pod：init 容器 + 主容器 + 边车 + 共享卷 | 第 2 章 |
 | `10-config.yaml` | ConfigMap + Secret | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment 与 Service | 第 5、6 章 |
 | `30-web.yaml` | web 前端 Deployment 与 Service | 第 5、6 章 |

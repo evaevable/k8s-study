@@ -1,0 +1,129 @@
+# ============================================================================
+# 第 2 章动手实验：一个"三容器"的裸 Pod
+#
+# 目的：亲手验证 Pod 的三件事
+#   1. init 容器是串行执行、全部成功后才启动主容器
+#   2. 同一 Pod 内的容器共享网络命名空间（用 localhost 互访）
+#   3. 同一 Pod 内的容器可以共享存储卷（emptyDir）
+#
+# 重要：这是**教学用裸 Pod**，不要在生产环境这么写。
+#      生产环境应该用 Deployment 管理（第 5 章），这样 Pod 挂了才会自动重建。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 15-pod-demo.yaml
+#   kubectl get pod api-demo -n cloudnote -w
+# ============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-demo
+  namespace: cloudnote
+  labels:
+    app: cloudnote
+    component: api
+    purpose: chapter-02-demo
+spec:
+  # --------------------------------------------------------------------------
+  # ① init 容器：串行执行，必须成功退出，全部完成才会启动业务容器
+  #    它负责把配置文件渲染到共享卷里，供主容器使用
+  # --------------------------------------------------------------------------
+  initContainers:
+    - name: render-config
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[init] 开始渲染配置..."
+          cat > /workdir/default.conf <<'NGINX_CONF'
+          server {
+              listen 8080;
+              server_name _;
+              access_log /var/log/app/access.log;
+              location / {
+                  root /usr/share/nginx/html;
+                  index index.html;
+              }
+          }
+          NGINX_CONF
+          cat > /workdir/app.conf <<'APP_CONF'
+          server.port=8080
+          db.host=postgres
+          db.port=5432
+          APP_CONF
+          echo "[init] 配置渲染完成："
+          ls -l /workdir
+      volumeMounts:
+        - name: config-out
+          mountPath: /workdir
+
+  # --------------------------------------------------------------------------
+  # ② 业务容器：两个，并行启动，共享同一个网络命名空间
+  # --------------------------------------------------------------------------
+  containers:
+    # 主容器：这里用 nginx 模拟 CloudNote 的 api 服务
+    - name: api
+      image: nginx:1.27-alpine
+      ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+      volumeMounts:
+        # 挂载 init 容器渲染出来的 nginx 配置
+        # 注意：挂载目录会覆盖镜像里 /etc/nginx/conf.d 原有的 default.conf
+        - name: config-out
+          mountPath: /etc/nginx/conf.d
+          readOnly: true
+        # 共享日志目录，给边车容器读
+        - name: shared-logs
+          mountPath: /var/log/app
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+
+    # 边车容器：每 5 秒访问一次 localhost:8080
+    # 它能通，唯一的原因就是"和主容器共享了网络命名空间"
+    - name: health-prober
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[sidecar] 等待主容器就绪..."
+          sleep 3
+          echo "[sidecar] 开始用 localhost:8080 探测主容器"
+          while true; do
+            if wget -qO- http://localhost:8080/ >/dev/null 2>&1; then
+              echo "api 健康"
+            else
+              echo "api 不可达"
+            fi
+            sleep 5
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+  # --------------------------------------------------------------------------
+  # ③ 卷：emptyDir 是节点上的临时目录，生命周期"随 Pod"
+  #    Pod 被删除时，里面的数据会一起消失（所以适合放配置和日志，不适合放数据）
+  # --------------------------------------------------------------------------
+  volumes:
+    - name: config-out
+      emptyDir: {}
+    - name: shared-logs
+      emptyDir: {}
+
+  restartPolicy: Always
+
+  # 优雅终止时间：kubectl delete 后，给容器最多 30 秒收尾
+  terminationGracePeriodSeconds: 30
