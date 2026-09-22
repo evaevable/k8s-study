@@ -219,6 +219,94 @@ kubectl → API Server → 读 etcd（或用它的 watch 缓存）→ 返回
 
 > 这也解释了一个常见误解：**"K8s 集群大了 etcd 会被读爆"。**现实恰恰相反——etcd 的读压力主要来自 API Server 的缓存失效，真正的写压力才是瓶颈。这也是为什么 K8s 对对象数量、ConfigMap 大小（1MB 上限）都有硬限制。
 
+### 一个高频误解：它是"调度者"吗？
+
+学到这里，很多人会得出一个结论：
+
+> "apiserver 就是集群的调度者吧？所有请求都通过它发送和接收。"
+
+**这句话对了一半，而错的那一半会引发连锁困惑。**
+
+对的那一半（而且很关键）：
+
+> **所有请求都必须经过它，没有例外。**读也好、写也好，kubectl 也好、kubelet 也好、控制器也好——全集群只有这一个地址能读写状态。
+
+错的那一半：**它不"调度"，它不决定任何事。**
+
+中文里"调度"这个词有两个意思，容易混在一起：
+
+| "调度"的含义 | 对应 K8s 里的谁 |
+|---|---|
+| 分配任务、安排资源（scheduling） | **kube-scheduler**——这才是真正的"调度者" |
+| 统一收发、中转（dispatching） | apiserver，但更准确的说法是**唯一入口 / 中枢**，不是"调度者" |
+
+精确的一句话应该是：
+
+> **kube-apiserver 是"唯一的事实入口 + 广播站"。它负责"收、验、存、播"四件事，唯独不负责"决定"。**
+
+| 它做 | 它不做 |
+|---|---|
+| **收**：接收所有读写请求 | 不决定 Pod 该去哪个节点（→ scheduler） |
+| **验**：认证、授权、准入改写与校验 | 不决定要不要补副本（→ controller-manager） |
+| **存**：写入 etcd，对象此刻才算存在 | 不决定容器怎么启动（→ kubelet） |
+| **播**：通过 watch 把变更推给所有订阅者 | 不决定 Service 该怎么转发（→ kube-proxy 写内核规则） |
+
+有个细节最能说明这一点：**scheduler 的决策结果，也是"交给 apiserver 去记录"的。**
+
+scheduler 决出节点后，它做的事情是调用 apiserver 的一个子资源接口：
+
+```
+POST /api/v1/namespaces/<ns>/pods/<name>/binding
+```
+
+apiserver 收到后，只是把 `spec.nodeName` 这个字段写进对象里。**它不理解、也不校验"为什么选这个节点"——它只是登记。**
+
+#### 亲手验证：apiserver 真的不调度
+
+K8s 里有一个很好玩的实验：**手动指定 `nodeName`，就能完全绕过 scheduler。**
+
+```bash
+# 先在节点上打一个标签，方便挑节点
+kubectl get nodes
+
+# 直接创建一个 Pod，并在 spec 里写死 nodeName
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bypass-scheduler
+  namespace: cloudnote
+spec:
+  nodeName: k8s-study-worker    # 把这里换成你集群里真实的 worker 节点名
+  containers:
+    - name: web
+      image: nginx:1.27-alpine
+EOF
+
+kubectl get pod bypass-scheduler -n cloudnote -o wide
+```
+
+**这个 Pod 会正常跑起来**，尽管 scheduler 从头到尾没有参与——因为 scheduler 只处理"`nodeName` 为空"的 Pod，你填上了，它就无权干涉；而目标节点的 kubelet 发现"这个 Pod 归我管"，直接开干。
+
+反过来说：**把 scheduler 停掉，只要 `nodeName` 写死，Pod 照样能被创建和运行。**这就证明了"调度"是一个**可选的外部决策者**，而不是 apiserver 的功能。
+
+> 顺带一个隐藏知识点：**`spec.nodeName` 是 Pod 创建后少数几个"不可修改"却"可在创建时指定"的字段之一。**它一旦被写入，就代表"这个 Pod 属于这台节点了"，改不了——只能删掉重建（回到第 2 章"Pod 是一次性的"）。
+
+#### 那"看起来像决策"的准入控制怎么解释
+
+你可能会反驳：apiserver 里的**准入控制**明明会改写对象（比如补 `strategy: RollingUpdate`），这不就是"做决定"吗？
+
+区别在于**性质**：
+
+| | 准入控制（apiserver 内） | 调度（scheduler） |
+|---|---|---|
+| 做的事 | 应用**既定策略**：补默认值、校验合法性 | 做**动态选择**：在多个合法选项中挑一个 |
+| 依赖什么 | 只依赖请求本身和静态策略 | 依赖**全集群的实时状态**（各节点剩余资源、污点、亲和性） |
+| 结果确定吗 | 对同一个对象，**结果永远一样** | 同一个 Pod，**不同时间可能调度到不同节点** |
+| 输出 | 改写后的对象 | 一个绑定决策 |
+
+**"应用固定策略"和"做动态选择"是两回事。**apiserver 只做前者：你给它一个对象，它按规则整理好、存起来、广播出去——**它从不比较"哪个方案更好"**。
+
 ### 一个冷知识：它监听哪个端口
 
 ```bash
