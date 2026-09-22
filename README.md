@@ -27,7 +27,7 @@
 |---|---|---|---|
 | 01 | [一张地图看清 Kubernetes](chapters/01-why-k8s.md) | 有了 Docker，为什么还要 K8s？K8s 到底在管什么？ | 已发布 |
 | 02 | [容器与 Pod：最小调度单元的秘密](chapters/02-pod.md) | 为什么最小单位不是容器而是 Pod？ | 已发布 |
-| 03 | 集群的解剖学：控制平面与工作节点 | API Server / etcd / Scheduler / Kubelet 各干什么？ | 待发布 |
+| 03 | [集群的解剖学：控制平面与工作节点](chapters/03-cluster-anatomy.md) | API Server / Scheduler / Kubelet 各干什么？ | 已发布 |
 | 04 | 声明式 API 与控制器模式：K8s 的灵魂 | 「期望状态」和「调谐循环」到底怎么运作？ | 待发布 |
 | 05 | 把应用跑起来：Deployment 与滚动更新 | 怎么发布？怎么回滚？ | 待发布 |
 | 06 | Pod 之间怎么说话：Service、DNS 与数据面 | 一个虚拟 IP 背后发生了什么？ | 待发布 |
@@ -51,10 +51,12 @@ k8s-study/
 ├── README.md                     # 本文件：课程总览与目录
 ├── chapters/                     # 每一章的正文（Markdown，含 Mermaid 图谱）
 │   ├── 01-why-k8s.md
-│   └── 02-pod.md
+│   ├── 02-pod.md
+│   └── 03-cluster-anatomy.md
 ├── cases/cloudnote/              # 贯穿案例的 YAML 清单，随章节逐步填充
 │   ├── 00-namespace.yaml
 │   ├── 15-pod-demo.yaml
+│   ├── tools/inspect-cluster.sh
 │   └── README.md
 └── .gitignore
 ```
