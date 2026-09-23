@@ -862,6 +862,256 @@ kubectl delete -f cases/cloudnote/10-config.yaml
 
 ---
 
+## 【积木 8-9】速查：四步流程 + 四种写法 + 常见报错
+
+前面讲的都是"为什么"。这一节是"怎么做"——可以直接照着抄。
+
+### 第 1 步：创建对象
+
+```bash
+# ConfigMap：三种来源
+kubectl create configmap api-config -n cloudnote \
+  --from-literal=log.level=info \
+  --from-literal=db.host=postgres
+
+# Secret：从字面量（key 自动大写转义要注意）
+kubectl create secret generic api-secret -n cloudnote \
+  --from-literal=DB_USER=cloudnote \
+  --from-literal=DB_PASSWORD='<password>'
+
+# Secret：从文件
+kubectl create secret generic tls-secret -n cloudnote \
+  --from-file=cert.pem --from-file=key.pem
+
+# Secret：TLS 证书（专用类型，自动设置正确的 key 名）
+kubectl create secret tls cloudnote-tls -n cloudnote \
+  --cert=note.example.com.crt --key=note.example.com.key
+
+# Secret：私有镜像仓库凭据
+kubectl create secret docker-registry regcred -n cloudnote \
+  --docker-server=registry.example.com \
+  --docker-username=ci-user --docker-password='<password>'
+
+# 验证
+kubectl get configmap,secret -n cloudnote
+kubectl get configmap api-config -n cloudnote -o jsonpath='{.data}'    # 看 key 有哪些
+```
+
+### 第 2 步：在 Pod 里引用（四种写法，语法完全对称）
+
+**① ConfigMap → 环境变量**
+
+```yaml
+spec:
+  containers:
+    - name: api
+      env:
+        # 单个 key：显式指定环境变量名
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: api-config
+              key: log.level
+              optional: false          # 不存在则 Pod 不启动；true 则用默认值
+      envFrom:
+        # 全部 key → 环境变量，加前缀避免污染
+        - configMapRef:
+            name: api-config
+          prefix: APP_                 # APP_LOG_LEVEL、APP_DB_HOST...
+```
+
+**② ConfigMap → 文件**
+
+```yaml
+spec:
+  containers:
+    - name: api
+      volumeMounts:
+        - name: cfg
+          mountPath: /etc/app         # 每个 key 变成一个文件
+          readOnly: true
+  volumes:
+    - name: cfg
+      configMap:
+        name: api-config
+        optional: false
+        defaultMode: 0644
+        # 想精确控制挂哪些 key、挂成什么文件名，用 items：
+        # items:
+        #   - key: app.properties
+        #     path: application.properties
+```
+
+**③ Secret → 环境变量**
+
+```yaml
+spec:
+  containers:
+    - name: api
+      env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:                # ← 只把 configMapKeyRef 换成 secretKeyRef
+              name: api-secret
+              key: DB_PASSWORD
+      envFrom:
+        - secretRef:                     # ← 只把 configMapRef 换成 secretRef
+            name: api-secret
+```
+
+**④ Secret → 文件**
+
+```yaml
+spec:
+  containers:
+    - name: api
+      volumeMounts:
+        - name: sec
+          mountPath: /etc/secrets
+          readOnly: true
+  volumes:
+    - name: sec
+      secret:
+        secretName: api-secret           # ← 注意这里字段名是 secretName，不是 name
+        defaultMode: 0400                # Secret 建议收紧权限
+```
+
+> **记忆窍门**：把 `configMap` 换成 `secret`、`configMapKeyRef` 换成 `secretKeyRef`、`configMapRef` 换成 `secretRef` 就是另一种。只有一个字段名不规则：**Secret 卷用的是 `secretName` 而不是 `name`**。
+
+### 第 3 步：验证真的注入进去了
+
+```bash
+# 环境变量进去了吗
+kubectl exec deploy/api -n cloudnote -- env | grep -E "LOG_LEVEL|DB_"
+
+# 文件挂进去了吗
+kubectl exec deploy/api -n cloudnote -- ls -l /etc/app/
+kubectl exec deploy/api -n cloudnote -- cat /etc/app/log.level
+
+# 挂载点长什么样（能看到软链接结构）
+kubectl exec deploy/api -n cloudnote -- ls -la /etc/app/
+```
+
+### 第 4 步：变更配置的标准流程
+
+```
+① 改 ConfigMap / Secret
+        ↓
+② 确认要不要重启（关键问题）
+     · 环境变量  → 必须重启
+     · subPath  → 必须重启
+     · 目录挂载  → 看应用会不会重载配置；不确定就当必须重启
+        ↓
+③ 触发滚动重启
+     kubectl rollout restart deployment/api -n cloudnote
+     kubectl rollout status  deployment/api -n cloudnote
+        ↓
+④ 验证配置已经生效
+     kubectl exec deploy/api -n cloudnote -- env | grep LOG_LEVEL
+```
+
+**更稳的做法**（推荐生产用）：**ConfigMap 名字带版本号 + `immutable: true`**，改配置 = 新建对象 + 改 Deployment 引用。这样"配置变更"和"发布"始终一起发生，不会有人忘记重启。
+
+### 一个完整的集成示例（CloudNote api）
+
+把本章所有零件拼起来，`api` 的 Deployment 该长这样：
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: cloudnote
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+      annotations:
+        # 关键：把配置的哈希写进模板，配置一改就自动触发滚动更新（Helm 里常用）
+        # checksum/config: <configmap 内容的 sha256>
+    spec:
+      imagePullSecrets:              # 私有镜像仓库凭据（只认 Secret）
+        - name: regcred
+      containers:
+        - name: api
+          image: registry.example.com/cloudnote/api:1.2.3
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # ① 少量标量走环境变量
+          env:
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef: { name: api-config, key: log.level }
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef: { name: api-config, key: db.host }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: api-secret, key: DB_PASSWORD }
+
+          # ② 整份配置文件走卷挂载（挂到专用子目录，别覆盖父目录）
+          volumeMounts:
+            - name: app-config
+              mountPath: /etc/app
+              readOnly: true
+            - name: db-creds
+              mountPath: /etc/secrets
+              readOnly: true
+
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+
+      volumes:
+        - name: app-config
+          configMap:
+            name: api-config
+        - name: db-creds
+          secret:
+            secretName: api-secret
+            defaultMode: 0400
+```
+
+**这个清单里每一行的来历**：
+
+| 片段 | 来自 |
+|---|---|
+| `env` 里用 `configMapKeyRef` / `secretKeyRef` | 积木 8-4 方式一 |
+| `volumeMounts` 挂到 `/etc/app`（专用子目录） | 积木 8-6 血案一（不要挂父目录） |
+| `defaultMode: 0400` | 积木 8-4 的 Secret 收紧权限 |
+| `imagePullSecrets` | 积木 8-3（只认 Secret） |
+| `checksum` 注解（注释掉的那行） | 积木 8-5 方案 ③（根治"改配置不生效"） |
+| `readinessProbe` + `resources` | 第 5 章的生产必备字段清单 |
+
+### 常见报错对照表
+
+| 现象 | 原因 | 怎么查 / 怎么修 |
+|---|---|---|
+| Pod 卡在 `CreateContainerConfigError` | 引用的 ConfigMap/Secret **不存在** | `kubectl describe pod` 看 Events；确认名字和命名空间；或加 `optional: true` |
+| `could not find key XXX in configmap` | **key 名拼错**（常见于大小写） | `kubectl get cm api-config -o jsonpath='{.data}'` 核对 |
+| Pod `ImagePullBackOff` + `401 Unauthorized` | 私有仓库**缺 `imagePullSecrets`** | 创建 `docker-registry` Secret 并在 Pod 里引用 |
+| 改了配置**完全没生效** | 你用的是环境变量（永不更新） | `kubectl rollout restart` |
+| 挂了文件的配置改了没生效 | `subPath` 挂载（永不更新） | 改成目录挂载，或接受重启 |
+| 文件更新了但应用行为没变 | 应用启动时只读了一次配置 | 让应用监听文件变化，或重启 Pod |
+| nginx 起不来，报 `mime.types not found` | 挂载**覆盖了整个 `/etc/nginx`** | 改挂到 `/etc/nginx/conf.d` |
+| 挂进去的文件**权限不对**、非 root 容器读不了 | `defaultMode` 默认 0644，属主是 root | 设 `defaultMode`，配合 Pod 级 `securityContext.fsGroup` |
+| `kubectl describe cm` 能看到值，`describe secret` 看不到 | 这是**设计如此**，不是故障 | 用 `-o yaml` + `base64 -d` 看 Secret 内容 |
+
+> **一条排查主线**：出现配置类故障时，按这个顺序走——
+>
+> **① 对象存在吗 → ② key 名对吗 → ③ 注入方式是什么（决定要不要重启）→ ④ 挂载路径对不对（有没有覆盖父目录）→ ⑤ 应用会自己重载吗**
+
 ## 【本章小结】
 
 ### 四句话总结
@@ -905,6 +1155,8 @@ flowchart TB
 14. ConfigMap 的大小上限是多少？哪些东西不该放进去？（积木 8-7）
 15. `immutable: true` 有什么好处和代价？（积木 8-7）
 16. 私有镜像仓库的凭据该怎么配？Pod 报 `ImagePullBackOff` + `401` 时先看什么？（积木 8-3）
+17. ConfigMap 转成 Secret 引用，需要改哪三个字段名？**哪个字段名不规则？**（积木 8-9）
+18. Pod 卡在 `CreateContainerConfigError` 时，你的排查顺序是什么？（积木 8-9）
 
 ### 下一章预告
 
