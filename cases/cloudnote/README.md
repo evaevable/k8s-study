@@ -23,11 +23,12 @@
 | `tools/reconcile-lab.sh` | 调和循环实验（删 Pod 自愈、改标签造孤儿、幂等、409 冲突、并发删除） | 第 4 章 |
 | `tools/rollout-lab.sh` | 发布与回滚实验（滚动更新观察、坏版本、秒级回滚、maxSurge/revisionHistoryLimit） | 第 5 章 |
 | `tools/service-lab.sh` | Service 实验（Endpoints 自动维护、DNS、ping 不通但 curl 通、不 Ready 时地址簿变空、iptables 规则、NodePort、Headless） | 第 6 章 |
+| `tools/ingress-lab.sh` | 七层入口实验（检测控制器、路径分流、Prefix 匹配边界、TLS 终止） | 第 7 章 |
 | `10-config.yaml` | ConfigMap + Secret | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment（含探针、资源、滚动更新策略） | 第 5 章 |
 | `22-api-service.yaml` | api 的 Service | 第 6 章 |
-| `30-web.yaml` | web 前端 Deployment 与 Service | 第 5、6 章 |
-| `40-ingress.yaml` | Ingress 七层入口 | 第 7 章 |
+| `30-web.yaml` | web 前端 Deployment + Service（为第 7 章的路径分流提供第二个后端） | 第 7 章 |
+| `40-ingress.yaml` | Ingress 七层入口（按域名与路径分流 + TLS） | 第 7 章 |
 | `50-postgres.yaml` | StatefulSet + PVC | 第 9、13 章 |
 | `60-hpa.yaml` | 自动扩缩容 | 第 12 章 |
 | `70-probes-demo.yaml` | 探针与故障恢复演示 | 第 11 章 |

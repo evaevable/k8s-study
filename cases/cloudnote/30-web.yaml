@@ -1,0 +1,80 @@
+# ============================================================================
+# CloudNote 的 web 前端 —— Deployment + Service（第 7 章）
+#
+# 用途：为第 7 章的「按路径分流」实验提供第二个后端。
+#   有了 web 和 api 两个 Service，才能看出 Ingress 的 / 与 /api 规则是否生效。
+#
+# 说明：这里用公开的 nginx 镜像代替真实的前端静态资源镜像。
+#       真实场景下 web 就是一个装了前端打包产物的 nginx 镜像。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 30-web.yaml
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: cloudnote
+  labels:
+    app: web
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    kubernetes.io/change-cause: "初始发布 v1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: VERSION
+              value: "v1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: cloudnote
+  labels:
+    app: web
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: cloudnote
+spec:
+  type: ClusterIP
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

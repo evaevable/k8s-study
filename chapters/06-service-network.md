@@ -1022,7 +1022,9 @@ L4 源 IP 粘性：看"你从哪来"（网络层属性，会被 NAT 抹平）
 L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
 ```
 
-**判据很简单**：如果你的服务是"给不确定的网络环境下的真人用户"用的，**永远选 L7**。第 7 章的 Ingress Controller（Nginx Ingress、Traefik 等）都支持基于 Cookie 的粘性配置。
+**判据很简单**：如果你的服务是"给不确定的网络环境下的真人用户"用的，**永远选 L7**。第 7 章的 Ingress Controller（Traefik、Contour、Envoy Gateway 等）都支持基于 Cookie 的粘性配置。
+
+> 顺带提醒：曾经最流行的 `ingress-nginx` **已于 2026 年 3 月退役**（不再有安全补丁），选型时不要再新装它。第 7 章会详细讲这件事的来龙去脉。
 
 #### 那 StatefulSet 那种"必须连特定节点"的需求怎么解
 

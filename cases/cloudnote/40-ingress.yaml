@@ -1,0 +1,77 @@
+# ============================================================================
+# CloudNote 的七层入口 —— Ingress（第 7 章）
+#
+# 目标：
+#   https://note.example.com/       → web 服务（前端）
+#   https://note.example.com/api/*  → api 服务（后端接口）
+#
+# ⚠️ 前置条件（必须满足，否则这个对象不会有任何效果）：
+#   集群里必须有一个 Ingress Controller 在运行！
+#   Ingress 只是「声明」，需要控制器去 watch 它并生成真实的代理配置。
+#
+#   检查：kubectl get ingressclass
+#   2026 年的建议：新装请选仍在维护的控制器（Traefik / Contour / Envoy Gateway）。
+#   注意 ingress-nginx 已于 2026-03 退役，不再有安全补丁，不要新装。
+#
+# 关于 ingressClassName：
+#   下面这行默认注释掉了，依赖集群里存在「默认 IngressClass」。
+#   如果你的集群装了多个控制器，请取消注释并填上正确的类名：
+#     kubectl get ingressclass
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 20-api-deployment.yaml
+#   kubectl apply -f 22-api-service.yaml
+#   kubectl apply -f 30-web.yaml
+#   kubectl apply -f 40-ingress.yaml
+#   kubectl get ingress -n cloudnote
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cloudnote
+  namespace: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    # ⚠️ 注解是 Ingress 最大的可移植性陷阱：换一个控制器，这里的键名和语义完全不同。
+    #    下面这行是 Traefik 的写法；换成 Nginx 就是 nginx.ingress.kubernetes.io/...
+    #    Gateway API 就是为了消除这类私有扩展而设计的（见第 7 章积木 7-8）。
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  # 用哪个控制器来实现我。不写则依赖「默认 IngressClass」。
+  # ingressClassName: traefik
+
+  # TLS 配置：证书来自一个 type 为 kubernetes.io/tls 的 Secret
+  # 如果 Secret 还不存在，控制器不会报错，只是这条 TLS 配置不生效。
+  # 本仓库的 ingress-lab.sh 会用 openssl 生成一张自签证书来演示。
+  tls:
+    - hosts:
+        - note.example.com
+      secretName: cloudnote-tls
+
+  rules:
+    - host: note.example.com
+      http:
+        paths:
+          # 规则 A：/api 开头的请求 → api 服务
+          # pathType: Prefix 是按「路径元素」逐段匹配，不是字符串前缀：
+          #   匹配 /api、/api/、/api/v1、/api/v1/users
+          #   不匹配 /apifoo（因为第一段是 "apifoo"，不是 "api"）
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http        # 用端口名而不是数字，可以解耦（见第 6 章）
+
+          # 规则 B：兜底规则 —— 其余一切 → web 服务
+          # 注意 path: / 配 Prefix 会匹配所有请求，所以要确保这个后端一定能响应
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
