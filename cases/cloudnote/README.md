@@ -20,6 +20,7 @@
 | `00-namespace.yaml` | 命名空间 `cloudnote` | 第 2 章（前置）/ 第 8 章（详解） |
 | `15-pod-demo.yaml` | 三容器裸 Pod：init 容器 + 主容器 + 边车 + 共享卷 | 第 2 章 |
 | `tools/inspect-cluster.sh` | 集群透视脚本（只读，打印控制面/数据面关键信息） | 第 3 章 |
+| `tools/reconcile-lab.sh` | 调和循环实验（删 Pod 自愈、改标签造孤儿、幂等、409 冲突、并发删除） | 第 4 章 |
 | `10-config.yaml` | ConfigMap + Secret | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment 与 Service | 第 5、6 章 |
 | `30-web.yaml` | web 前端 Deployment 与 Service | 第 5、6 章 |
