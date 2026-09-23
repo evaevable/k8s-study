@@ -842,6 +842,70 @@ matchHost: note.example.com
 | **四层（L4）** | Service | IP、端口、协议 | 转发到后端，负载均衡 |
 | **七层（L7）** | Ingress | 域名、路径、Header、Cookie | 按规则路由、TLS 终止、重写 |
 
+#### 一个必须纠正的直觉：分界线不是"内部 vs 外部"
+
+很多人会得出这样一个简化结论：
+
+> "Service 负责集群**内部**互通，Ingress 负责与**外部**互通。"
+
+**这个说法方向对了一半，但分界线画错了**，而且会导致后面理解 Ingress 时处处别扭。两处需要纠正：
+
+**纠正一：Service 本身就能对外。**
+
+"能不能对外"不是 Service 的本质限制，而是 `type` 字段的一个取值：
+
+| `type` | 作用域 |
+|---|---|
+| `ClusterIP` | 仅集群内部 |
+| **`NodePort`** | **集群外可达**——每个节点开放一个高位端口 |
+| **`LoadBalancer`** | **公网可达**——云厂商分配一个公网 IP |
+| `ExternalName` | 只做 DNS 别名 |
+
+上一节【积木 6-7】讲的 `NodePort` / `LoadBalancer` 就是**专门用来对外的 Service**。所以"Service 只做内部"这句话不成立。
+
+**纠正二：Ingress 不能绕过 Service。**
+
+Ingress 的 `backend` 字段**必须指向一个 Service**，它没有办法直接指向 Pod。所以 Ingress 不是"另一条通向 Pod 的路"，而是**在 Service 前面再加一层**：
+
+```
+外部用户
+    │
+    ▼
+Ingress（七层：域名 / 路径 / TLS 终止）   ← 可选，但生产上必备
+    │  backend 必须指向一个 Service
+    ▼
+Service（四层：稳定虚拟 IP + 负载均衡）   ← 必须
+    │
+    ▼
+Pod × N
+```
+
+**真正的分界线是「四层 vs 七层」，不是「内部 vs 外部」。**更准确的两句话是：
+
+> **Service 回答："我这一组 Pod，用什么地址被访问？"**——作用范围由 `type` 决定。
+>
+> **Ingress 回答："来自外部的一个 HTTP 请求，应该按什么规则转给哪个 Service？"**——它天生面向外部，但**必须依赖 Service** 才能触达 Pod。
+
+**一个能彻底说明问题的例子（也是新手最大的坑）**：
+
+Ingress Controller（比如 Nginx Ingress Controller）**自己也是跑在集群里的 Pod**，而它要被外部访问到，**也得靠一个 `NodePort` 或 `LoadBalancer` 类型的 Service 暴露自己**。
+
+```
+外部流量 → ① LoadBalancer Service（暴露 Ingress Controller 自己）
+              ↓
+           ② Ingress Controller Pod（七层代理，真正做路由）
+              ↓ 按 Ingress 规则转发
+           ③ 业务 Service（ClusterIP）
+              ↓
+           ④ 业务 Pod
+```
+
+**所以"Ingress 负责对外"这个说法是循环的——它自己对外还得靠 Service。**这也顺便解释了那个最常见的困惑：
+
+> **只创建 `Ingress` 对象是没有任何效果的。**`Ingress` 只是一个"声明"，它需要有一个 **Ingress Controller** 去 watch 它、并生成实际的代理配置。**没装 Controller，`Ingress` 就是一纸空文**——这和第 4 章讲的"控制器模式"是同一套逻辑。
+
+第 7 章会把这条链路完整走一遍。
+
 ### 坑二：ClusterIP 只在集群内可达
 
 `10.96.x.x` 这个网段**只在集群内部有意义**。你的笔记本、你的手机、公司内网——都访问不到它。
@@ -1033,6 +1097,8 @@ L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
 14. 默认的随机负载均衡下，同一个用户的两次请求会到同一个 Pod 吗？"同一个 TCP 连接里的多个请求"呢？（积木 6-10）
 15. `sessionAffinity: ClientIP` 在什么场景下会**彻底失效甚至变成故障**？为什么说 L7 的 Cookie 粘性比它好？（积木 6-10）
 16. 需要"精确连到某一个特定 Pod"（比如 MySQL 主库）时，该用什么？为什么不能用粘性来解决？（积木 6-8、6-10）
+17. "Service 负责内部、Ingress 负责外部"这个说法错在哪？请说出两处纠正。（积木 6-10）
+18. Ingress Controller 自己是怎么被外部访问到的？"只创建 Ingress 对象"为什么没有效果？（积木 6-10、第 4 章控制器模式）
 
 ### 下一章预告
 
