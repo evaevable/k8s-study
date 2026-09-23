@@ -1,0 +1,109 @@
+# ============================================================================
+# 第 9 章动手实验：PVC 与 emptyDir 的 A/B 对照（对应 45-pvc-demo 实验）
+#
+# 两个 Pod 结构完全相同、挂载点相同（都是 /data），只有后端存储不同：
+#   data-demo-pvc       → PVC（动态供给的持久卷）
+#   data-demo-emptydir  → emptyDir（随 Pod 生命周期）
+#
+# 实验结论：删 Pod 重建后，PVC 那边的文件还在，emptyDir 那边的没了。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 45-pvc-demo.yaml
+# ============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-demo
+  namespace: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+    purpose: chapter-09-demo
+spec:
+  # 访问模式：ReadWriteOnce 的准确含义是「一个节点可读写」，不是「一个 Pod」。
+  # 想要严格的单 Pod 独占，要用 ReadWriteOncePod。
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: standard
+  #   不写则使用集群里被标记为 default 的 StorageClass。
+  #   在 kind / minikube 里通常是 standard（rancher.io/local-path），
+  #   它的 reclaimPolicy 是 Delete、volumeBindingMode 是 WaitForFirstConsumer。
+  #
+  # ⚠️ reclaimPolicy: Delete 意味着：删除这个 PVC 会真的删除底层存储和数据。
+  #    数据库场景请使用 reclaimPolicy: Retain 的 StorageClass。
+---
+# A 组：挂 PVC —— 数据独立于 Pod 生命周期
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-demo-pvc
+  namespace: cloudnote
+  labels:
+    purpose: chapter-09-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[data-demo-pvc] 启动于 $(date +%H:%M:%S)"
+          echo "[data-demo-pvc] /data 目录内容："
+          ls -la /data
+          echo "（如果上面有 important.txt，说明上次 Pod 写入的数据活下来了）"
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: data-demo     # ← 应用只知道 PVC 的名字，不知道底层是什么存储
+  restartPolicy: Always
+---
+# B 组：挂 emptyDir —— 数据随 Pod 一起消失
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-demo-emptydir
+  namespace: cloudnote
+  labels:
+    purpose: chapter-09-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[data-demo-emptydir] 启动于 $(date +%H:%M:%S)"
+          echo "[data-demo-emptydir] /data 目录内容："
+          ls -la /data
+          echo "（这里永远是空的 —— emptyDir 随 Pod 生命周期）"
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  volumes:
+    - name: data
+      emptyDir: {}
+  restartPolicy: Always
