@@ -22,6 +22,7 @@
 | `tools/inspect-cluster.sh` | 集群透视脚本（只读，打印控制面/数据面关键信息） | 第 3 章 |
 | `tools/reconcile-lab.sh` | 调和循环实验（删 Pod 自愈、改标签造孤儿、幂等、409 冲突、并发删除） | 第 4 章 |
 | `tools/rollout-lab.sh` | 发布与回滚实验（滚动更新观察、坏版本、秒级回滚、maxSurge/revisionHistoryLimit） | 第 5 章 |
+| `tools/service-lab.sh` | Service 实验（Endpoints 自动维护、DNS、ping 不通但 curl 通、不 Ready 时地址簿变空、iptables 规则、NodePort、Headless） | 第 6 章 |
 | `10-config.yaml` | ConfigMap + Secret | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment（含探针、资源、滚动更新策略） | 第 5 章 |
 | `22-api-service.yaml` | api 的 Service | 第 6 章 |

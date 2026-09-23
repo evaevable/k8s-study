@@ -30,7 +30,7 @@
 | 03 | [集群的解剖学：控制平面与工作节点](chapters/03-cluster-anatomy.md) | API Server / Scheduler / Kubelet 各干什么？ | 已发布 |
 | 04 | [声明式 API 与控制器模式：K8s 的灵魂](chapters/04-declarative-controller.md) | 「期望状态」和「调谐循环」到底怎么运作？ | 已发布 |
 | 05 | [把应用跑起来：Deployment 与滚动更新](chapters/05-deployment.md) | 怎么发布？怎么回滚？ | 已发布 |
-| 06 | Pod 之间怎么说话：Service、DNS 与数据面 | 一个虚拟 IP 背后发生了什么？ | 待发布 |
+| 06 | [Pod 之间怎么说话：Service、DNS 与数据面](chapters/06-service-network.md) | 一个虚拟 IP 背后发生了什么？ | 已发布 |
 | 07 | 让世界访问你：Ingress 与南北向流量 | 域名怎么进来？ | 待发布 |
 | 08 | 配置与密钥：ConfigMap 与 Secret | 配置怎么和镜像解耦？ | 待发布 |
 | 09 | 数据要持久：Volume、PV、PVC、StorageClass | 容器死了数据为什么还在？ | 待发布 |
@@ -54,14 +54,17 @@ k8s-study/
 │   ├── 02-pod.md
 │   ├── 03-cluster-anatomy.md
 │   ├── 04-declarative-controller.md
-│   └── 05-deployment.md
+│   ├── 05-deployment.md
+│   └── 06-service-network.md
 ├── cases/cloudnote/              # 贯穿案例的 YAML 清单，随章节逐步填充
 │   ├── 00-namespace.yaml
 │   ├── 15-pod-demo.yaml
 │   ├── 20-api-deployment.yaml
+│   ├── 22-api-service.yaml
 │   ├── tools/inspect-cluster.sh
 │   ├── tools/reconcile-lab.sh
 │   ├── tools/rollout-lab.sh
+│   ├── tools/service-lab.sh
 │   └── README.md
 └── .gitignore
 ```
