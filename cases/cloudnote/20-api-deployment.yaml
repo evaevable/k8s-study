@@ -1,0 +1,97 @@
+# ============================================================================
+# CloudNote 的 api 服务 —— Deployment（第 5 章）
+#
+# 说明（重要）：
+#   CloudNote 真实的 api 镜像监听 8080 端口。
+#   为了让本章实验在**任何**机器上都能跑起来（无需私有镜像仓库），
+#   这里用公开的 nginx 镜像代替，它默认监听 80 端口。
+#   等你换成真实镜像时，把 containerPort / 探针端口 / targetPort 改成 8080 即可。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 20-api-deployment.yaml
+#   kubectl rollout status deployment/api -n cloudnote
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: cloudnote
+  labels:
+    app: api
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    # 每次发布都更新它，rollout history 里才会显示人能看懂的原因
+    kubernetes.io/change-cause: "初始发布 v1"
+spec:
+  # ① 要几个副本
+  #    生产上无状态服务建议 >= 2，否则发布期间会短暂中断
+  replicas: 2
+
+  # ② 标签选择器：Deployment 用它「认领」属于自己的 Pod
+  #    硬约束：它必须能匹配到 spec.template.metadata.labels，否则 API Server 拒绝创建
+  #    注意：这个字段创建后不可修改（immutable）
+  selector:
+    matchLabels:
+      app: api
+
+  # ③ 更新策略
+  #    maxSurge: 1        滚动过程中最多多出 1 个 Pod（总 Pod <= replicas + 1）
+  #    maxUnavailable: 0  滚动过程中最多允许 0 个 Pod 不可用（可用 Pod >= replicas）
+  #    两者不能同时为 0，否则控制器无法推进
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  # ④ 保留多少个历史 ReplicaSet（决定能回滚多远）
+  #    设成 0 会失去回滚能力，不要动它
+  revisionHistoryLimit: 10
+
+  # ⑤ 进度停滞多久标记为失败（单位秒）
+  #    注意：超时只是打个 ProgressDeadlineExceeded 标记，**不会自动回滚**
+  progressDeadlineSeconds: 600
+
+  # ⑥ Pod 模板：新 Pod 长什么样
+  template:
+    metadata:
+      labels:
+        app: api                  # ← 必须能被上面的 selector 匹配到
+    spec:
+      containers:
+        - name: api
+          image: nginx:1.27-alpine
+          ports:
+            - name: http           # 给端口起名字，Service 里可以用 targetPort: http 引用
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: VERSION
+              value: "v1"          # 实验中靠改它来触发一次「发布」
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # readinessProbe 才是滚动更新真正的「刹车」：
+          # 探针通过之前，这个 Pod 不会被算作 Ready，也就不会被加进 Service 后端
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          # livenessProbe 决定什么时候重启容器（进程假死时救命用）
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
