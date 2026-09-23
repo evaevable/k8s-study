@@ -436,6 +436,47 @@ flowchart LR
 
 ---
 
+### 最容易混淆的一对：Deployment 与 Service
+
+上面那张表里，有两个名字最容易让人误以为是一回事——**因为它们的中文都沾了"服务"两个字**。先把它们彻底分开：
+
+> **Deployment 管"有没有人在干活"；Service 管"怎么找到干活的人"。**
+
+| | Deployment | Service |
+|---|---|---|
+| 类别 | **工作负载（Workload）** | **网络对象（Network）** |
+| 管什么 | 跑什么镜像、跑几个副本、怎么更新 | 给这组 Pod 一个**稳定地址**，做负载均衡 |
+| 关注的本质 | **进程的存在性** | **地址的稳定性** |
+| 同类兄弟 | StatefulSet / DaemonSet / Job / CronJob | Ingress / EndpointSlice / NetworkPolicy |
+| 能否对外暴露端口 | **不能** | 能（ClusterIP / NodePort / LoadBalancer） |
+| 没有对方会怎样 | 没有它，Pod 挂了不会自动重建 | 没有它，Pod 在跑但外部访问不到 |
+
+**它们是两个平行的对象，不是包含关系。**典型的三层结构是这样的：
+
+```
+Deployment（管副本与版本）
+      ↓ 创建并维持
+   Pod × 3（真正跑进程，监听 :8080）
+      ↑ 通过标签匹配
+Service（提供稳定 ClusterIP + DNS，把流量分给这 3 个 Pod）
+```
+
+#### 最精彩的一点：它们互不认识
+
+**Deployment 里没有任何字段指向 Service，Service 里也没有任何字段指向 Deployment。**它们之间唯一的联系是**标签**：
+
+- Deployment 创建 Pod 时给它贴上 `app: api`
+- Service 用 `selector: app: api` 去找后端
+
+这个松耦合带来两个反直觉的推论，你可以亲手验证：
+
+1. **删掉 Service，Deployment 毫不知情**——Pod 照样跑，副本数照样维持，只是外部访问不到了。
+2. **把 Deployment 换成 StatefulSet，只要 Pod 的标签不变，Service 完全不需要改动。**
+
+> 顺便纠正一个常见的错误认知：**Deployment 里的 `containerPort` 并不"开放"任何端口。**它只是**声明性质**的说明（给人和工具看的文档），真正让流量进来的必须是 Service。事实上，`containerPort` 不写也能正常工作——**除非你要用命名端口给 Service 引用**（`targetPort: http`），那时名字就变成必需的了。
+
+> 一个类比帮你记牢：**Deployment 是后厨的排班表**（要几个厨师在岗，走一个补一个）；**Service 是前台的订餐电话**（客户打这个号码，转给任意一个在岗的厨师）。**排班表不接电话，订餐电话也不做菜。**
+
 ## 【积木 1-9】贯穿全书的案例：CloudNote 云笔记
 
 现在介绍我们这门课的"主角"。从第 2 章开始到第 14 章，我们所有的例子都围着它转。
