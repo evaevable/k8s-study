@@ -32,7 +32,7 @@
 | 05 | [把应用跑起来：Deployment 与滚动更新](chapters/05-deployment.md) | 怎么发布？怎么回滚？ | 已发布 |
 | 06 | [Pod 之间怎么说话：Service、DNS 与数据面](chapters/06-service-network.md) | 一个虚拟 IP 背后发生了什么？ | 已发布 |
 | 07 | [让世界访问你：Ingress 与南北向流量](chapters/07-ingress.md) | 域名怎么进来？为什么 ingress-nginx 退役了？ | 已发布 |
-| 08 | 配置与密钥：ConfigMap 与 Secret | 配置怎么和镜像解耦？ | 待发布 |
+| 08 | [配置与密钥：ConfigMap 与 Secret](chapters/08-configmap-secret.md) | 配置怎么和镜像解耦？Secret 真的安全吗？ | 已发布 |
 | 09 | 数据要持久：Volume、PV、PVC、StorageClass | 容器死了数据为什么还在？ | 待发布 |
 | 10 | 调度与资源管理 | requests/limits、QoS、亲和性、污点容忍 | 待发布 |
 | 11 | 自愈的真相：探针与故障恢复 | K8s 到底能修哪些故障？不能修哪些？ | 待发布 |
@@ -56,10 +56,13 @@ k8s-study/
 │   ├── 04-declarative-controller.md
 │   ├── 05-deployment.md
 │   ├── 06-service-network.md
-│   └── 07-ingress.md
+│   ├── 07-ingress.md
+│   └── 08-configmap-secret.md
 ├── cases/cloudnote/              # 贯穿案例的 YAML 清单，随章节逐步填充
 │   ├── 00-namespace.yaml
+│   ├── 10-config.yaml
 │   ├── 15-pod-demo.yaml
+│   ├── 18-config-demo.yaml
 │   ├── 20-api-deployment.yaml
 │   ├── 22-api-service.yaml
 │   ├── 30-web.yaml
@@ -69,6 +72,7 @@ k8s-study/
 │   ├── tools/rollout-lab.sh
 │   ├── tools/service-lab.sh
 │   ├── tools/ingress-lab.sh
+│   ├── tools/config-lab.sh
 │   └── README.md
 └── .gitignore
 ```

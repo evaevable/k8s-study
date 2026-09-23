@@ -24,7 +24,9 @@
 | `tools/rollout-lab.sh` | 发布与回滚实验（滚动更新观察、坏版本、秒级回滚、maxSurge/revisionHistoryLimit） | 第 5 章 |
 | `tools/service-lab.sh` | Service 实验（Endpoints 自动维护、DNS、ping 不通但 curl 通、不 Ready 时地址簿变空、iptables 规则、NodePort、Headless） | 第 6 章 |
 | `tools/ingress-lab.sh` | 七层入口实验（检测控制器、路径分流、Prefix 匹配边界、TLS 终止） | 第 7 章 |
-| `10-config.yaml` | ConfigMap + Secret | 第 8 章 |
+| `tools/config-lab.sh` | 配置注入实验（三路注入行为对比、Secret 解密实证、目录覆盖坑、optional） | 第 8 章 |
+| `10-config.yaml` | ConfigMap `api-config` + Secret `api-secret`（含"Secret 不是加密"的安全说明） | 第 8 章 |
+| `18-config-demo.yaml` | 三种注入方式并存的演示 Pod（环境变量 / 目录挂载 / subPath） | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment（含探针、资源、滚动更新策略） | 第 5 章 |
 | `22-api-service.yaml` | api 的 Service | 第 6 章 |
 | `30-web.yaml` | web 前端 Deployment + Service（为第 7 章的路径分流提供第二个后端） | 第 7 章 |

@@ -1,0 +1,62 @@
+# ============================================================================
+# CloudNote 的配置与密钥 —— ConfigMap + Secret（第 8 章）
+#
+# 作用：把「配置」从镜像里拿出来，让同一份镜像能在不同环境跑。
+#
+# ⚠️ 重要安全说明：
+#   本文件里的密码是**故意写死的假值**，只为教学演示。
+#   真实项目里**绝对不要**把真实的 Secret YAML 提交进 Git ——
+#   提交进 Git 就等于公开（历史记录、fork、CI 日志都可能泄漏）。
+#   生产做法：Sealed Secrets / SOPS / External Secrets Operator / Vault。
+#
+#   还要记住：Secret 默认**不是加密的**，只是 base64 编码。
+#   验证：kubectl get secret api-secret -n cloudnote \
+#           -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 10-config.yaml
+#   kubectl get configmap,secret -n cloudnote
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: cloudnote
+  labels:
+    app: cloudnote
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    kubernetes.io/change-cause: "初始配置"
+data:
+  # 普通键值对：注入成环境变量或挂成文件
+  log.level: "debug"
+  server.port: "8080"
+  db.host: postgres.cloudnote.svc.cluster.local
+  db.port: "5432"
+  db.name: cloudnote
+
+  # 也可以直接放整份配置文件的内容（key 会变成文件名）
+  app.properties: |
+    server.port=8080
+    log.level=debug
+    db.host=postgres.cloudnote.svc.cluster.local
+    db.port=5432
+---
+# Secret 的类型：Opaque 是默认的「任意键值对」类型。
+# 其他常用类型见第 8 章积木 8-3（kubernetes.io/tls、dockerconfigjson 等）。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-secret
+  namespace: cloudnote
+  labels:
+    app: cloudnote
+    app.kubernetes.io/part-of: cloudnote
+type: Opaque
+# stringData 是「只写字段」：这里写明文，API Server 写入时自动转成 base64 存进 data。
+# 读出来只会看到 data，不会看到 stringData。
+stringData:
+  DB_USER: cloudnote
+  DB_PASSWORD: "ThisIsAFakePassword-OnlyForLab"   # ← 教学用假密码，生产请用外部密钥管理
+  REDIS_PASSWORD: "AlsoFake-Redis"
