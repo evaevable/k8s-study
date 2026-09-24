@@ -60,6 +60,18 @@ spec:
       labels:
         app: api                  # ← 必须能被上面的 selector 匹配到
     spec:
+      # 打散（第 10 章）：同一节点上尽量只放一个 api 副本。
+      # 用 ScheduleAnyway 而不是 DoNotSchedule —— 节点数少于副本数时不会卡住调度。
+      # 这是「真高可用」与「假高可用」的分界线：
+      # 两个副本都在同一节点上，挂一台机器就等于全挂。
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
+
       containers:
         - name: api
           image: nginx:1.27-alpine

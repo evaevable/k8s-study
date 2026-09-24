@@ -34,7 +34,7 @@
 | 07 | [让世界访问你：Ingress 与南北向流量](chapters/07-ingress.md) | 域名怎么进来？为什么 ingress-nginx 退役了？ | 已发布 |
 | 08 | [配置与密钥：ConfigMap 与 Secret](chapters/08-configmap-secret.md) | 配置怎么和镜像解耦？Secret 真的安全吗？ | 已发布 |
 | 09 | [数据要持久：Volume、PV、PVC、StorageClass](chapters/09-storage.md) | 容器死了数据为什么还在？RWO 到底是什么？ | 已发布 |
-| 10 | 调度与资源管理 | requests/limits、QoS、亲和性、污点容忍 | 待发布 |
+| 10 | [调度与资源管理：requests、limits、QoS 与亲和性](chapters/10-scheduling.md) | 为什么 CPU 只是变慢而内存会被杀？ | 已发布 |
 | 11 | 自愈的真相：探针与故障恢复 | K8s 到底能修哪些故障？不能修哪些？ | 待发布 |
 | 12 | 弹性伸缩：HPA / VPA / Cluster Autoscaler | 怎么自动从 2 个副本扩到 20 个？ | 待发布 |
 | 13 | 工作负载全景：StatefulSet / DaemonSet / Job | 有状态服务、每节点一个、批处理任务怎么办？ | 待发布 |
@@ -58,7 +58,8 @@ k8s-study/
 │   ├── 06-service-network.md
 │   ├── 07-ingress.md
 │   ├── 08-configmap-secret.md
-│   └── 09-storage.md
+│   ├── 09-storage.md
+│   └── 10-scheduling.md
 ├── cases/cloudnote/              # 贯穿案例的 YAML 清单，随章节逐步填充
 │   ├── 00-namespace.yaml
 │   ├── 10-config.yaml
@@ -66,6 +67,7 @@ k8s-study/
 │   ├── 18-config-demo.yaml
 │   ├── 20-api-deployment.yaml
 │   ├── 22-api-service.yaml
+│   ├── 28-scheduling-demo.yaml
 │   ├── 30-web.yaml
 │   ├── 40-ingress.yaml
 │   ├── 45-pvc-demo.yaml
@@ -76,6 +78,7 @@ k8s-study/
 │   ├── tools/ingress-lab.sh
 │   ├── tools/config-lab.sh
 │   ├── tools/storage-lab.sh
+│   ├── tools/scheduling-lab.sh
 │   └── README.md
 └── .gitignore
 ```

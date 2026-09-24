@@ -1,0 +1,170 @@
+# ============================================================================
+# 第 10 章动手实验：资源与调度的可观察样本
+#
+# 包含四组对象：
+#   ① QoS 三兄弟   qos-guaranteed / qos-burstable / qos-besteffort
+#   ② 内存炸弹     oom-demo          → 观察 OOMKilled
+#   ③ 硬性打散     spread-hard       → 观察 topologySpreadConstraints 的代价
+#   ④ 高 requests  too-big           → 观察 FailedScheduling（Insufficient cpu）
+#
+# 说明：这些 Pod 都是「演示用」，会主动制造异常（OOM、Pending）。
+#       请只在实验集群使用。脚本结束时会把它们全部清理掉。
+#
+# 使用：
+#   kubectl apply -f 28-scheduling-demo.yaml
+#   kubectl get pods -n cloudnote -l purpose=chapter-10-demo \
+#     -o custom-columns='NAME:.metadata.name,QOS:.status.qosClass,STATUS:.status.phase'
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# ① QoS 三兄弟：只有 resources 写法不同，其他完全一样
+# ---------------------------------------------------------------------------
+# Guaranteed：requests 与 limits 完全相等（CPU 和内存都要写）
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-guaranteed
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 50m          # ← 与 requests 完全相同
+          memory: 64Mi      # ← 与 requests 完全相同
+---
+# Burstable：写了 requests，但 requests < limits
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-burstable
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m         # ← 大于 requests
+          memory: 256Mi     # ← 大于 requests
+---
+# BestEffort：完全没写 resources
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-besteffort
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+      # 没有任何 resources 字段 —— 这就是 BestEffort
+      # 它是节点资源紧张时第一个被驱逐的
+---
+# ---------------------------------------------------------------------------
+# ② 内存炸弹：试图吃掉远超 limit 的内存 → 触发 OOMKilled
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-demo
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  containers:
+    - name: hog
+      image: busybox:1.36
+      # 用 dd 往内存里灌数据（写到 /dev/shm 属于内存），超过 64Mi 就会被杀
+      command:
+        - sh
+        - -c
+        - |
+          echo "开始分配内存，limit 只有 64Mi……"
+          dd if=/dev/zero of=/dev/shm/hog bs=1M count=200 2>/dev/null || true
+          sleep 3600
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi        # ← 生死线：超过就被 OOMKilled
+---
+# ---------------------------------------------------------------------------
+# ③ 硬性打散：3 副本 + DoNotSchedule
+#    节点数 >= 3 时完美分散；节点数 < 3 时后面的副本会永远 Pending
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-hard
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: spread-hard
+  template:
+    metadata:
+      labels:
+        app: spread-hard
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule      # ← 硬性：做不到就不调度
+          labelSelector:
+            matchLabels:
+              app: spread-hard
+      containers:
+        - name: demo
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 3600"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+---
+# ---------------------------------------------------------------------------
+# ④ 高 requests：故意要一个节点装不下的量 → 观察 FailedScheduling
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-big
+  namespace: cloudnote
+  labels:
+    purpose: chapter-10-demo
+spec:
+  containers:
+    - name: demo
+      image: busybox:1.36
+      # 注意：容器实际只用 1m CPU，但 requests 写了 100 核
+      # 调度器只看 requests，所以这个 Pod 永远调度不上去
+      command: ["sh", "-c", "sleep 3600"]
+      resources:
+        requests:
+          cpu: "100"
+          memory: 100Gi
