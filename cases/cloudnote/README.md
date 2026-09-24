@@ -29,6 +29,7 @@
 | `tools/scheduling-lab.sh` | 调度与资源实验（FailedScheduling、CPU 限流、OOMKilled、QoS 等级、打散软硬对比、taint 与 toleration） | 第 10 章 |
 | `tools/probes-lab.sh` | 探针与自愈实验（容器重启 vs Pod 重建、readiness 只摘流量、CrashLoopBackOff 退避、慢启动死循环与修复） | 第 11 章 |
 | `tools/autoscaling-lab.sh` | 弹性伸缩实验（metrics-server 检测、TARGETS 含义、扩容与比例公式、缩容延迟、扩了但 Pending、VPA 资源建议） | 第 12 章 |
+| `tools/workloads-lab.sh` | 工作负载实验（StatefulSet 三个稳定与有序启动、独立 PVC、Pod 级 DNS、重建后身份与存储不变、DaemonSet 每节点一个、Job 与 Indexed 分片、CronJob） | 第 13 章 |
 | `10-config.yaml` | ConfigMap `api-config` + Secret `api-secret`（含"Secret 不是加密"的安全说明） | 第 8 章 |
 | `18-config-demo.yaml` | 三种注入方式并存的演示 Pod（环境变量 / 目录挂载 / subPath） | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment（含探针、资源、滚动更新策略） | 第 5 章 |
@@ -38,7 +39,7 @@
 | `35-worker.yaml` | worker 异步任务 Deployment（IO 密集、CPU 利用率低，用于演示「指标选错」） | 第 12 章 |
 | `40-ingress.yaml` | Ingress 七层入口（按域名与路径分流 + TLS） | 第 7 章 |
 | `45-pvc-demo.yaml` | PVC + 两个对照 Pod（PVC vs emptyDir），用于观察数据持久性差异 | 第 9 章 |
-| `50-postgres.yaml` | StatefulSet + PVC | 第 13 章 |
+| `50-postgres.yaml` | headless Service + StatefulSet（含 volumeClaimTemplates，每个 Pod 独立 PVC） | 第 13 章 |
 | `60-hpa.yaml` | 弹性伸缩：api 的 HPA（按 CPU）+ worker 的 HPA（按队列积压量）+ VPA（Off 模式当资源顾问） | 第 12 章 |
 | `70-probes-demo.yaml` | 探针与自愈演示（CrashLoopBackOff 退避、慢启动死循环、startupProbe 修复、三探针职责分离） | 第 11 章 |
 | `kustomization.yaml` | 一键部署全部 | 第 14 章 |

@@ -1,0 +1,179 @@
+# ============================================================================
+# CloudNote 的数据库 —— headless Service + StatefulSet（第 13 章）
+#
+# 为什么必须用 StatefulSet 而不是 Deployment（第 9 章埋的伏笔）：
+#   ① 身份：每个副本需要稳定的名字与 DNS 名（postgres-0/1/2），
+#           Deployment 的 Pod 名是随机后缀，重建后就认不出来了
+#   ② 存储：每个副本需要【自己独立的 PVC】，
+#           用 Deployment 时所有副本会抢同一个 PVC → 数据互相覆盖
+#   ③ 顺序：数据库主从必须逐个加入（0 号先成为主库），
+#           Deployment 会同时启动所有副本
+#
+# ⚠️ 重要提醒：StatefulSet 只提供这三块「地基」，它【不解决】：
+#     数据复制、选主/故障转移、备份、版本升级、扩容后的数据再平衡。
+#   生产上请优先考虑：云托管数据库 > PostgreSQL Operator（CloudNativePG 等）> 手写 StatefulSet。
+#
+# 本清单用官方 postgres 镜像做「能跑起来」的最小演示。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 10-config.yaml        # 需要 api-secret 提供 DB_PASSWORD
+#   kubectl apply -f 50-postgres.yaml
+#   kubectl get pods,pvc -n cloudnote -l app=postgres -w
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# ① headless Service：给每个 Pod 提供稳定的 DNS 名
+#    这是 StatefulSet 的 serviceName 要指向的对象，必填。
+#
+#    clusterIP: None 的含义（第 6 章）：DNS 不返回一个虚拟 IP，
+#    而是返回【所有】Pod 的 IP。同时 StatefulSet 会为每个 Pod 生成：
+#      postgres-0.postgres.cloudnote.svc.cluster.local
+#      postgres-1.postgres.cloudnote.svc.cluster.local
+#      postgres-2.postgres.cloudnote.svc.cluster.local
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: cloudnote
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: cloudnote
+spec:
+  clusterIP: None                # ← headless
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# ---------------------------------------------------------------------------
+# ② StatefulSet
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: cloudnote
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    kubernetes.io/change-cause: "初始发布 PostgreSQL 16"
+spec:
+  # 必填：指向 headless Service，Pod 级 DNS 名依赖它
+  serviceName: postgres
+
+  replicas: 3
+
+  # OrderedReady（默认）：0 就绪后才建 1，1 就绪后才建 2；删除时倒序
+  #   —— 分布式系统需要「逐个加入」时必须是这个
+  # Parallel：所有 Pod 同时创建（但身份和独立存储仍然保证）
+  podManagementPolicy: OrderedReady
+
+  selector:
+    matchLabels:
+      app: postgres
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 默认就是 1：一次只更新一个副本（数据库不能同时重启多个）
+      partition: 0
+
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # 数据库不配打散：多个副本带各自的 PVC，通常更适合绑定到固定的存储节点
+      # 如果确实要打散，用 topologySpreadConstraints（第 10 章）
+      terminationGracePeriodSeconds: 60      # 给数据库时间落盘
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            # 第 9 章那个经典坑：PGDATA 必须放在子目录，否则初始化会报
+            # "data directory is not empty"（因为挂载点里可能有 lost+found）
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
+              value: cloudnote
+            - name: POSTGRES_DB
+              value: cloudnote
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-secret
+                  key: DB_PASSWORD
+            # 让从库知道自己的身份（演示用；真实的复制配置复杂得多）
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          # 就绪探针是「有序启动」的判据：
+          # 没有它，OrderedReady 会退化成「起了就算就绪」，主从可能错乱
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "cloudnote"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+
+          # 存活探针：数据库这里要谨慎（参考第 11 章：liveness 配错会雪崩）
+          # 用它只检查「进程自身还能不能响应」，不检查任何外部依赖
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "cloudnote"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+
+  # -------------------------------------------------------------------------
+  # ③ 稳定存储：给每个 Pod 自动创建一个独立的 PVC
+  #
+  # 命名规则：<这里的 name>-<StatefulSet名>-<序号>
+  #   本清单会创建：data-postgres-0 / data-postgres-1 / data-postgres-2
+  #
+  # 关键特性：Pod 被重建时，会【挂回它原来那个 PVC】—— 数据不丢、身份不变。
+  #          这是 Deployment 做不到的（Deployment 的 Pod 不知道"我原来用哪块盘"）。
+  #
+  # ⚠️ 注意：删除 StatefulSet 【不会】删除这些 PVC（刻意的保护）。
+  #         所以要清理必须手动删：
+  #           kubectl delete pvc -n cloudnote -l app=postgres
+  #
+  # 生产上按数据类型选 StorageClass（第 9 章）：
+  #   数据库 → reclaimPolicy: Retain + 高性能 SSD + allowVolumeExpansion: true
+  # -------------------------------------------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: postgres
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # storageClassName: fast-ssd-retain
+        #   建议用 reclaimPolicy: Retain 的 StorageClass，
+        #   避免误删 PVC 时连底层数据一起删掉（第 9 章红线一）
