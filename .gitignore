@@ -15,3 +15,8 @@ kubeconfig*.yaml
 # 临时目录
 tmp/
 .tmp/
+
+# mdBook 构建产物与 mdbook-mermaid 生成的资源
+book/
+mermaid.min.js
+mermaid-init.js

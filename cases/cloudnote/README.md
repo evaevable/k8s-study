@@ -1,7 +1,8 @@
-# CloudNote 案例清单
+# 配套资源：CloudNote 清单与实验脚本
 
-本目录存放贯穿案例 **CloudNote（云笔记服务）** 的 Kubernetes 清单文件。
-它们会随着课程章节的推进逐步添加。
+本目录是《从零讲透 Kubernetes》的配套资源，存放贯穿案例 **CloudNote（云笔记服务）** 的全部 Kubernetes 清单与实验脚本：15 个 YAML 文件、13 个实验脚本、1 份 Kustomize 聚合清单。
+
+这些文件可以独立于书稿运行。正文中每处"配套脚本"的引用，指向的都是本目录下的文件。下面各表的"对应章节"一列，用于反向定位某个文件在书中的讲解位置。
 
 ## 一键部署
 
@@ -33,7 +34,7 @@ bash tools/capstone-lab.sh cleanup
 | `redis` | 缓存 | 1 | 是（可容忍丢失） | 第 6 章 |
 | `postgres` | 主数据库 | 1 | 是（必须持久化） | 第 9 / 13 章 |
 
-## 文件规划
+## 文件清单
 
 | 文件 | 内容 | 对应章节 |
 |---|---|---|
@@ -66,13 +67,17 @@ bash tools/capstone-lab.sh cleanup
 | `70-probes-demo.yaml` | 探针与自愈演示（CrashLoopBackOff 退避、慢启动死循环、startupProbe 修复、三探针职责分离） | 第 11 章 |
 | `kustomization.yaml` | Kustomize 聚合清单（一条命令装起生产形态的全部资源） | 第 14 章 |
 
-## 使用方式
+## 使用建议
 
-第 14 章之前，建议**按章节单独 apply**，一次只观察一个概念的效果：
+阅读第 14 章之前，建议**按章节单独 apply**，一次只观察一个概念的效果：
 
 ```bash
-kubectl apply -f <本章对应的 yaml>
+kubectl apply -f <该章对应的 yaml>
 kubectl get pods -w
 ```
 
-第 14 章会给出完整的一键部署流程与演练脚本。
+这样做的目的是让每个对象的行为孤立可见。把全部清单一次性提交上去，现象会互相干扰，也看不出单个字段的作用。
+
+第 14 章给出完整的一键部署流程与故障演习脚本，届时再用上面的"一键部署"一节。
+
+所有实验脚本都以 `cloudnote` 命名空间为作用域，`tools/diagnose.sh` 与 `tools/inspect-cluster.sh` 为只读，其余脚本会创建和删除资源，请不要在生产集群上运行。

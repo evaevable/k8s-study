@@ -1,0 +1,30 @@
+[book]
+title = "从零讲透 Kubernetes"
+description = "从一次凌晨故障到一套生产级集群：以 CloudNote 为贯穿案例的 Kubernetes 原理与实践"
+authors = ["evaevable"]
+language = "zh-CN"
+# 正文直接留在 chapters/ 目录，SUMMARY.md 也放在那里（mdBook 要求它必须位于 src 内）。
+# 这样 cases/ 下的 YAML 与实验脚本天然不会被当成章节收进书里。
+src = "chapters"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/evaevable/k8s-study"
+edit-url-template = "https://github.com/evaevable/k8s-study/edit/main/chapters/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
