@@ -1,15 +1,6 @@
 # 第 6 章　Pod 之间怎么说话：Service、DNS 与数据面
 
-> **本章导读**
-> - 建议用时：65 分钟（含 25 分钟动手）
-> - 前置知识：第 3 章（数据面、kube-proxy 是规则写入器）、第 5 章（Deployment 发布）
-> - 读完你应该能回答四个问题：
->   1. `ClusterIP` 是什么？**为什么它 `ping` 不通，却能用 `curl` 连上？**
->   2. kube-proxy 到底在内核里写了什么？流量是怎么被"分"到多个 Pod 的？
->   3. `web` 要调用 `api`，该写 IP 还是写域名？为什么同一个命名空间下写个 `api` 就能通？
->   4. `headless Service` 是什么？什么时候必须用它？
-
-第 5 章结束的时候，CloudNote 的 `api` 已经在跑了：
+第 5 章结束时，CloudNote 的 `api` 已经在跑：
 
 ```bash
 kubectl get pods -n cloudnote -l app=api -o wide
@@ -18,15 +9,17 @@ kubectl get pods -n cloudnote -l app=api -o wide
 # api-6b8c9d7f4-p4m8n    1/1     Running   10.244.2.9
 ```
 
-现在前端 `web` 要调用它。**怎么调？**这一章就解决这个问题——它是整个 K8s 里最"魔法"的一块，也是面试最爱问的一块。
+前端 `web` 需要调用它，问题随之而来：这两个 Pod 的 IP 会随重建而改变，`web` 应该连哪一个。
+
+本章回答的就是这个问题。Service 是 Kubernetes 中最具"魔法"色彩的一层——它提供一个永不改变的地址，背后的 Pod 却可以随时来去。本章的任务是把这层魔法拆开：ClusterIP 为什么 ping 不通、EndpointSlice 如何维护后端列表、kube-proxy 为什么不转发任何流量、DNS 的 `ndots:5` 又埋了什么坑。
 
 ---
 
-## 【积木 6-1】三个死结：为什么 Pod IP 不能直接用
+### 6.1 三个死结：为什么 Pod IP 不能直接用
 
-先别急着上 Service，我们看看"直接连 Pod IP"会撞上什么。
+在引入 Service 之前，先看"直接连 Pod IP"会撞上什么。
 
-### 死结一：Pod IP 会变
+#### 死结一：Pod IP 会变
 
 第 2 章讲过，Pod 是一次性的。滚动更新、节点故障、手动删除——任何一种情况都会让 Pod 换一个 IP。
 
@@ -41,19 +34,19 @@ kubectl get pods -n cloudnote -l app=api -o wide
 
 **配置一旦指向具体 IP，就等于给自己埋了个定时炸弹。**
 
-### 死结二：副本不止一个
+#### 死结二：副本不止一个
 
 `api` 有 2 个副本。写 `10.244.1.7`，那就只有 1 个 Pod 在干活，另一个闲置；而且这个 Pod 一挂，整个服务就 502。
 
 你想自己写个客户端负载均衡？那还得自己维护"当前有哪些 Pod IP"的列表——**这不就是把 K8s 已经帮你做好的事又做了一遍吗？**
 
-### 死结三：谁来做健康检查的过滤
+#### 死结三：谁来做健康检查的过滤
 
 如果 api 的 2 个副本里，有 1 个因为数据库连不上而无法工作（但进程还活着），**你希望流量别打到它身上**。
 
 **这需要有人持续地盯着"哪些副本现在是好的"，然后动态调整转发目标。**让业务代码自己干，成本太高。
 
-### 所以需要一个新角色
+#### 所以需要一个新角色
 
 > **Service 的职责：给一组"短暂的、会变的、可能不健康的" Pod，提供一个"持久的、单一的、只包含健康副本的"访问入口。**
 
@@ -67,11 +60,11 @@ kubectl get pods -n cloudnote -l app=api -o wide
 
 用一句类比概括：
 
-> **Pod 是流水线上的工人，今天来明天走；Service 是车间门口那块写着"业务办理处"的牌子——牌子不动，牌子后面站的是谁，随时可以换。**
+**Pod 是流水线上的工人，今天来明天走；Service 是车间门口那块写着"业务办理处"的牌子——牌子不动，牌子后面站的是谁，随时可以换。**
 
 ---
 
-## 【积木 6-2】Service 由四部分构成
+### 6.2 Service 由四部分构成
 
 拆开一个 Service，它其实是四个东西的组合：
 
@@ -100,11 +93,11 @@ flowchart TB
 
 ---
 
-## 【积木 6-3】EndpointSlice：Service 背后那本"地址簿"
+### 6.3 EndpointSlice：Service 背后那本"地址簿"
 
 这是本章第一个必须建立的概念，**也是排查 Service 问题时的第一站**。
 
-### 它从哪来
+#### 它从哪来
 
 `endpointslice-controller` 在持续做一件很简单的事：
 
@@ -118,7 +111,7 @@ flowchart TB
 
 **又是一个"读期望、读实际、对比、修正"的循环。**只不过这里的"期望"是你写的 selector，"实际"是集群里 Pod 的当前状态。
 
-### 怎么看
+#### 怎么看
 
 ```bash
 # 老命令（依然好用）
@@ -138,9 +131,9 @@ api         10.244.1.7:80,10.244.2.9:80        3m
 
 **这两个 `IP:Port`，就是此刻真实的、健康的、可以被转发的后端。**
 
-### 最重要的一条排查经验
+#### 最重要的一条排查经验
 
-> **Service 连不通，第一个要看的就是 `kubectl get endpoints`。**
+**Service 连不通，第一个要看的就是 `kubectl get endpoints`。**
 
 因为这里是"Service 世界"和"Pod 世界"的交界处。它能立刻告诉你是哪一侧出了问题：
 
@@ -165,11 +158,11 @@ spec:
 
 **这种情况下 `kubectl get svc` 一切正常，`ClusterIP` 也分配了，就是连不上。**所有"Service 明明创建成功了却访问不通"的问题，十有八九在这里。
 
-> 顺带一个冷知识：**`Endpoints` 这个老对象从 Kubernetes 1.33 起被标记为弃用**，官方推荐用 `EndpointSlice`。原因是 `Endpoints` 在服务规模大时单个对象过于庞大（一个 Service 有几千个 Pod 时，这个对象会有几十 MB），而 `EndpointSlice` 会把它切成多片（默认每片最多 100 个后端）。**排查时两个都可以看，但记住未来的方向是 EndpointSlice。**
+顺带一个冷知识：**`Endpoints` 这个老对象从 Kubernetes 1.33 起被标记为弃用**，官方推荐用 `EndpointSlice`。原因是 `Endpoints` 在服务规模大时单个对象过于庞大（一个 Service 有几千个 Pod 时，这个对象会有几十 MB），而 `EndpointSlice` 会把它切成多片（默认每片最多 100 个后端）。**排查时两个都可以看，但记住未来的方向是 EndpointSlice。**
 
 ---
 
-## 【积木 6-4】一个 Service 的 YAML 逐字段拆解
+### 6.4 一个 Service 的 YAML 逐字段拆解
 
 文件位置：`cases/cloudnote/22-api-service.yaml`
 
@@ -198,7 +191,7 @@ spec:
   sessionAffinity: None
 ```
 
-### 三个值得单独讲的点
+#### 三个值得单独讲的点
 
 **第一：`targetPort` 可以写名字，这是个解耦神器。**
 
@@ -224,11 +217,11 @@ targetPort: http    # ← 引用 Deployment 里 containerPort 的 name: http
 
 ---
 
-## 【积木 6-5】ClusterIP 的真相：一个"谎言的集合"
+### 6.5 ClusterIP 的真相：一个"谎言的集合"
 
 现在进入本章最核心、也最反直觉的部分。
 
-### 先做个小实验（提前剧透结论）
+#### 先做个小实验（提前剧透结论）
 
 ```bash
 kubectl apply -f cases/cloudnote/22-api-service.yaml
@@ -253,7 +246,7 @@ kubectl run -it --rm probe --image=busybox:1.36 -n cloudnote --restart=Never -- 
 
 **同一个 IP，`ping` 不通，`curl` 却通。**为什么？
 
-### 真相：这个 IP 压根不存在
+#### 真相：这个 IP 压根不存在
 
 ```
 $ ip addr | grep 10.96
@@ -262,7 +255,7 @@ $ ip addr | grep 10.96
 
 **没有任何一张网卡拥有 `10.96.14.7` 这个地址。**你在任何节点、任何 Pod 里都找不到它。
 
-那数据包是怎么到达 Pod 的？答案回到第 3 章【积木 3-1】那条数据面链路：
+那数据包是怎么到达 Pod 的？答案回到第 3 章第 3.1 节那条数据面链路：
 
 ```
 应用发起 TCP 连接，目标 10.96.14.7:8080
@@ -293,7 +286,7 @@ flowchart TB
 
 **所以 ClusterIP 是一个"约定"，不是一台"主机"。**它的全部实现就是"内核里一条会改写目标地址的规则"。
 
-### 那为什么 ping 不通
+#### 那为什么 ping 不通
 
 关键区别在**协议**：
 
@@ -304,19 +297,19 @@ flowchart TB
 
 **这是理解 ClusterIP 最锋利的一刀：**
 
-> **ClusterIP 不是"地址"，而是"一组针对 TCP/UDP 的地址改写规则"。**
->
-> 所以 `ping` 不通完全正常，**它不是故障**。想测 Service 通不通，**永远用 TCP 工具**：`curl`、`wget`、`nc -zv`，而不是 `ping`。
+**ClusterIP 不是"地址"，而是"一组针对 TCP/UDP 的地址改写规则"。**
 
-> 这个知识点能帮你避开一个超常见的误判：**"我 ping 不通 Service，肯定是网络坏了"——不，你只是用错了工具。**
+所以 `ping` 不通完全正常，**它不是故障**。想测 Service 通不通，**永远用 TCP 工具**：`curl`、`wget`、`nc -zv`，而不是 `ping`。
+
+这个知识点能帮你避开一个超常见的误判：**"我 ping 不通 Service，肯定是网络坏了"——不，你只是用错了工具。**
 
 ---
 
-## 【积木 6-6】kube-proxy 到底写了什么规则
+### 6.6 kube-proxy 到底写了什么规则
 
-既然 ClusterIP 的实现是"内核规则"，那我们就去看看那些规则长什么样。
+既然 ClusterIP 的实现是"内核规则"，那就直接去看那些规则长什么样。
 
-### 三种模式
+#### 三种模式
 
 | 模式 | 说明 | 现状 |
 |---|---|---|
@@ -332,7 +325,7 @@ kubectl logs -n kube-system -l k8s-app=kube-proxy | grep -i "Using.*proxy"
 kubectl get ds kube-proxy -n kube-system -o yaml | grep -A3 mode
 ```
 
-### iptables 模式的规则链长什么样
+#### iptables 模式的规则链长什么样
 
 这是最有教育意义的部分。kube-proxy 会写这样一条链：
 
@@ -368,7 +361,7 @@ DNAT          tcp  --  0.0.0.0/0  0.0.0.0/0  to:10.244.1.7:80
 | `KUBE-SVC-<哈希>` | 一个 Service 一条：**在这一组后端之间做选择** | `SVC` = Service |
 | `KUBE-SEP-<哈希>` | 一个后端一条：**执行 DNAT，改写成真实的 Pod IP:Port** | `SEP` = Service EndPoint |
 
-### 负载均衡是怎么做的：一个"概率游戏"
+#### 负载均衡是怎么做的：一个"概率游戏"
 
 看 `KUBE-SVC-XXXX` 那两条规则：
 
@@ -388,9 +381,9 @@ KUBE-SEP-BBB                                            0.5
 | iptables | `statistic mode random probability`（随机概率） | 规则线性遍历，Service 多了会变慢 |
 | IPVS | 默认 `rr`（轮询），还支持 `lc` / `wrr` / `sh` 等多种 | 哈希查找，O(1)，支持会话保持 |
 
-> **这就是为什么大规模集群推荐 IPVS**：假设你有 5000 个 Service，每个都有 10 条 iptables 规则，那就是 5 万条规则。每个包都要**从上往下遍历**一遍——这是 O(n) 的复杂度。而 IPVS 用哈希表，是 O(1)。
+**这就是为什么大规模集群推荐 IPVS**：假设你有 5000 个 Service，每个都有 10 条 iptables 规则，那就是 5 万条规则。每个包都要**从上往下遍历**一遍——这是 O(n) 的复杂度。而 IPVS 用哈希表，是 O(1)。
 
-### 再次强调那个反直觉的定位
+#### 再次强调那个反直觉的定位
 
 第 3 章就说过，这里再钉一遍，因为它是理解数据面的关键：
 
@@ -405,11 +398,11 @@ KUBE-SEP-BBB                                            0.5
 
 ---
 
-## 【积木 6-7】四种 Service 类型：从集群内到公网
+### 6.7 四种 Service 类型：从集群内到公网
 
 `type` 字段决定这个 Service 的"可达范围"。
 
-### ① ClusterIP（默认）：只在集群内可达
+#### ① ClusterIP（默认）：只在集群内可达
 
 ```yaml
 spec:
@@ -420,7 +413,7 @@ spec:
 
 **CloudNote 里 api、redis、postgres 之间的互相调用，全都用 ClusterIP。**
 
-### ② NodePort：在每个节点上开一个端口
+#### ② NodePort：在每个节点上开一个端口
 
 ```yaml
 spec:
@@ -444,9 +437,9 @@ curl http://<任意一个节点的IP>:30080
 | 实现简单 | **客户端要记住"节点 IP + 端口"** |
 | 常用于本地开发和测试 | 节点宕机时，那个 IP 就不通了 |
 
-> **NodePort 通常不是最终方案**，而是"过渡形态"——因为没人愿意把 `http://1.2.3.4:30080` 给用户。实践中常见的是：NodePort + 前面的负载均衡器（云 LB、Nginx、HAProxy）。**第 7 章的 Ingress 就是干这个的。**
+**NodePort 通常不是最终方案**，而是"过渡形态"——因为没人愿意把 `http://1.2.3.4:30080` 给用户。实践中常见的是：NodePort + 前面的负载均衡器（云 LB、Nginx、HAProxy）。**第 7 章的 Ingress 就是干这个的。**
 
-### ③ LoadBalancer：让云厂商给你一个公网 IP
+#### ③ LoadBalancer：让云厂商给你一个公网 IP
 
 ```yaml
 spec:
@@ -466,7 +459,7 @@ spec:
 
 **所以"LoadBalancer 类型的 Service 一直 Pending"是本地集群的经典现象**——因为没有云控制器来给你分配 IP。kind / minikube 上要么用 `MetalLB` 这类工具，要么用 `kubectl port-forward` 顶着。
 
-### ④ ExternalName：一个 DNS 别名
+#### ④ ExternalName：一个 DNS 别名
 
 ```yaml
 spec:
@@ -478,7 +471,7 @@ spec:
 
 **用途**：把"迁移到集群内"这件事变成一次 DNS 变更。比如你的应用连的是 `postgres`，将来把外部的数据库迁到集群里，**应用代码一行都不用改，只需把 ExternalName 换成真正的 Service**。
 
-### 四种类型对比表
+#### 四种类型对比表
 
 | 类型 | 可达范围 | 有没有 ClusterIP | 典型场景 | 谁来实现 |
 |---|---|---|---|---|
@@ -489,13 +482,13 @@ spec:
 
 ---
 
-## 【积木 6-8】DNS：真正让服务发现变好用的那一层
+### 6.8 DNS：真正让服务发现变好用的那一层
 
 有了 ClusterIP，你终于不用写 Pod IP 了。但写 `10.96.14.7` 也很难看、很难记——而且**跨环境时这个 IP 会变**（测试集群和生产集群分配的 ClusterIP 不同）。
 
 所以 K8s 还给了你一层 DNS。
 
-### 谁在提供 DNS
+#### 谁在提供 DNS
 
 ```bash
 kubectl get pods -n kube-system -l k8s-app=kube-dns
@@ -510,7 +503,7 @@ kubectl get svc -n kube-system kube-dns
 
 有趣的是：**CoreDNS 自己也是通过 Service 暴露的**——这是一个"用 Service 支撑 Service 发现"的自举结构。
 
-### 完整的 DNS 名字
+#### 完整的 DNS 名字
 
 每个 Service 都会自动获得一条 DNS 记录，格式是：
 
@@ -547,11 +540,11 @@ api.cluster.local
 api.                                ← 最后才当公网域名查
 ```
 
-> **`ndots:5` 是个值得知道的坑**：它表示"如果域名里的点少于 5 个，就先试 search 域"。所以查 `api.example.com` 时，解析器会**先尝试** `api.example.com.cloudnote.svc.cluster.local`（失败），再尝试真实地址——**多了一次无用的 DNS 查询，轻微增加延迟**。
->
-> 如果你发现应用的 DNS 解析特别慢，可以在 Deployment 里给 Pod 加 `dnsConfig`，调小 `ndots`。
+**`ndots:5` 是个值得知道的坑**：它表示"如果域名里的点少于 5 个，就先试 search 域"。所以查 `api.example.com` 时，解析器会**先尝试** `api.example.com.cloudnote.svc.cluster.local`（失败），再尝试真实地址——**多了一次无用的 DNS 查询，轻微增加延迟**。
 
-### Headless Service：一个特殊但重要的变体
+如果你发现应用的 DNS 解析特别慢，可以在 Deployment 里给 Pod 加 `dnsConfig`，调小 `ndots`。
+
+#### Headless Service：一个特殊但重要的变体
 
 ```yaml
 spec:
@@ -585,11 +578,11 @@ postgres-1.postgres.cloudnote.svc.cluster.local
 
 **这是 StatefulSet 能提供"稳定网络身份"的基础。**第 13 章会详细讲。
 
-> 顺带：headless Service 还有一个"半无头"用法——**不写 selector**，然后**手动创建 EndpointSlice** 指向集群外的地址。这是把外部数据库（比如 RDS）伪装成集群内 Service 的经典手法。
+顺带：headless Service 还有一个"半无头"用法——**不写 selector**，然后**手动创建 EndpointSlice** 指向集群外的地址。这是把外部数据库（比如 RDS）伪装成集群内 Service 的经典手法。
 
 ---
 
-## 【积木 6-9】动手：把 Service 的每一层都验一遍
+### 6.9 动手：把 Service 的每一层都验一遍
 
 配套脚本：
 
@@ -599,7 +592,7 @@ bash cases/cloudnote/tools/service-lab.sh
 
 手动流程如下。
 
-### 第一步：创建 Service
+#### 第一步：创建 Service
 
 ```bash
 kubectl apply -f cases/cloudnote/00-namespace.yaml
@@ -610,9 +603,9 @@ kubectl rollout status deployment/api -n cloudnote
 kubectl get svc api -n cloudnote
 ```
 
-记下 `CLUSTER-IP`，我们叫它 `$VIP`。
+记下 `CLUSTER-IP`，下文称它为 `$VIP`。
 
-### 第二步：看背后的地址簿
+#### 第二步：看背后的地址簿
 
 ```bash
 kubectl get endpoints api -n cloudnote
@@ -621,7 +614,7 @@ kubectl get endpointslices -n cloudnote -o wide
 
 **应该有两个 `IP:80`**（因为 Deployment 有 2 个副本）。
 
-### 第三步：验证 DNS
+#### 第三步：验证 DNS
 
 ```bash
 kubectl run -it --rm probe --image=busybox:1.36 -n cloudnote --restart=Never -- sh
@@ -645,7 +638,7 @@ wget -qO- http://api:8080 | head -3
 
 **注意 `nslookup api` 返回的就是 `$VIP`——DNS 这一层只负责让你"找到 Service"，不负责"找到某个 Pod"。**
 
-### 第四步：验证"ping 不通但 curl 通"
+#### 第四步：验证"ping 不通但 curl 通"
 
 ```sh
 # 失败：ICMP 没有 NAT 规则
@@ -658,16 +651,16 @@ nc -zv api 8080
 
 **这个对比请亲手做一遍**，它比任何文字都更能说明 ClusterIP 的本质。同时记住排查纪律：**永远别用 ping 测 Service。**
 
-### 第五步：观察负载均衡
+#### 第五步：观察负载均衡
 
 ```sh
 # 连续请求 10 次，看返回内容是否有变化
 for i in $(seq 1 10); do wget -qO- http://api:8080 | grep -o '<title>.*</title>'; done
 ```
 
-> 想看更明显的效果，可以让每个 Pod 返回自己的主机名。因为默认 nginx 页面不包含 Pod 名，这里只能看"是否都成功"。**要观察分流细节，看第六步。**
+想看更明显的效果，可以让每个 Pod 返回自己的主机名。因为默认 nginx 页面不包含 Pod 名，这里只能看"是否都成功"。**要观察分流细节，看第六步。**
 
-### 第六步：删一个 Pod，看地址簿自动更新
+#### 第六步：删一个 Pod，看地址簿自动更新
 
 在**另一个终端**盯着 Endpoints：
 
@@ -688,7 +681,7 @@ kubectl delete pod -n cloudnote -l app=api --wait=false
 
 **全程你没有碰过 Service 对象。**这就是 `endpointslice-controller` 在工作，也就是第 4 章的调和循环。
 
-### 第七步：制造"所有 Pod 都不 Ready"，看 Endpoints 变空
+#### 第七步：制造"所有 Pod 都不 Ready"，看 Endpoints 变空
 
 这是最能说明"Service 只转发给健康副本"的实验。用探针故意失败：
 
@@ -732,9 +725,9 @@ kubectl patch deployment api -n cloudnote --type=json -p='[
 ]'
 ```
 
-> **这就是第 5 章"就绪探针是滚动更新的刹车"的完整解释**：探针不只是控制发布节奏，它**直接决定了这个 Pod 会不会出现在 Service 的转发列表里**。
+**这就是第 5 章"就绪探针是滚动更新的刹车"的完整解释**：探针不只是控制发布节奏，它**直接决定了这个 Pod 会不会出现在 Service 的转发列表里**。
 
-### 第八步：看内核规则（有权限的话）
+#### 第八步：看内核规则（有权限的话）
 
 在 kind 集群里可以进节点看：
 
@@ -745,7 +738,7 @@ docker exec k8s-study-worker iptables -t nat -L -n | grep -E "KUBE-SVC|KUBE-SEP"
 
 **你会亲眼看到那些 DNAT 规则。**这就是 ClusterIP 的"真身"——一堆存在于内核里的地址改写规则。
 
-### 第九步：试一下 NodePort
+#### 第九步：试一下 NodePort
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -780,7 +773,7 @@ curl -s http://localhost:30080 | head -3
 kubectl delete svc api-nodeport -n cloudnote
 ```
 
-### 第十步：Headless Service 的 DNS 长什么样
+#### 第十步：Headless Service 的 DNS 长什么样
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -821,9 +814,9 @@ kubectl delete deployment api -n cloudnote
 
 ---
 
-## 【积木 6-10】几个必须知道的边界与坑
+### 6.10 几个必须知道的边界与坑
 
-### 坑一：Service 是四层的，不认 HTTP
+#### 坑一：Service 是四层的，不认 HTTP
 
 Service 只认识 `IP:Port`，**它看不懂 HTTP 请求里的域名和路径**。
 
@@ -842,11 +835,11 @@ matchHost: note.example.com
 | **四层（L4）** | Service | IP、端口、协议 | 转发到后端，负载均衡 |
 | **七层（L7）** | Ingress | 域名、路径、Header、Cookie | 按规则路由、TLS 终止、重写 |
 
-#### 一个必须纠正的直觉：分界线不是"内部 vs 外部"
+##### 一个必须纠正的直觉：分界线不是"内部 vs 外部"
 
 很多人会得出这样一个简化结论：
 
-> "Service 负责集群**内部**互通，Ingress 负责与**外部**互通。"
+"Service 负责集群**内部**互通，Ingress 负责与**外部**互通。"
 
 **这个说法方向对了一半，但分界线画错了**，而且会导致后面理解 Ingress 时处处别扭。两处需要纠正：
 
@@ -861,7 +854,7 @@ matchHost: note.example.com
 | **`LoadBalancer`** | **公网可达**——云厂商分配一个公网 IP |
 | `ExternalName` | 只做 DNS 别名 |
 
-上一节【积木 6-7】讲的 `NodePort` / `LoadBalancer` 就是**专门用来对外的 Service**。所以"Service 只做内部"这句话不成立。
+上一节第 6.7 节讲的 `NodePort` / `LoadBalancer` 就是**专门用来对外的 Service**。所以"Service 只做内部"这句话不成立。
 
 **纠正二：Ingress 不能绕过 Service。**
 
@@ -882,9 +875,9 @@ Pod × N
 
 **真正的分界线是「四层 vs 七层」，不是「内部 vs 外部」。**更准确的两句话是：
 
-> **Service 回答："我这一组 Pod，用什么地址被访问？"**——作用范围由 `type` 决定。
->
-> **Ingress 回答："来自外部的一个 HTTP 请求，应该按什么规则转给哪个 Service？"**——它天生面向外部，但**必须依赖 Service** 才能触达 Pod。
+**Service 回答："我这一组 Pod，用什么地址被访问？"**——作用范围由 `type` 决定。
+
+**Ingress 回答："来自外部的一个 HTTP 请求，应该按什么规则转给哪个 Service？"**——它天生面向外部，但**必须依赖 Service** 才能触达 Pod。
 
 **一个能彻底说明问题的例子（也是新手最大的坑）**：
 
@@ -902,17 +895,17 @@ Ingress Controller（比如 Nginx Ingress Controller）**自己也是跑在集�
 
 **所以"Ingress 负责对外"这个说法是循环的——它自己对外还得靠 Service。**这也顺便解释了那个最常见的困惑：
 
-> **只创建 `Ingress` 对象是没有任何效果的。**`Ingress` 只是一个"声明"，它需要有一个 **Ingress Controller** 去 watch 它、并生成实际的代理配置。**没装 Controller，`Ingress` 就是一纸空文**——这和第 4 章讲的"控制器模式"是同一套逻辑。
+**只创建 `Ingress` 对象是没有任何效果的。**`Ingress` 只是一个"声明"，它需要有一个 **Ingress Controller** 去 watch 它、并生成实际的代理配置。**没装 Controller，`Ingress` 就是一纸空文**——这和第 4 章讲的"控制器模式"是同一套逻辑。
 
 第 7 章会把这条链路完整走一遍。
 
-### 坑二：ClusterIP 只在集群内可达
+#### 坑二：ClusterIP 只在集群内可达
 
 `10.96.x.x` 这个网段**只在集群内部有意义**。你的笔记本、你的手机、公司内网——都访问不到它。
 
 想在集群外访问，必须走 NodePort / LoadBalancer / Ingress。
 
-### 坑三：同一个 Service 里的多个 port 必须有名字
+#### 坑三：同一个 Service 里的多个 port 必须有名字
 
 ```yaml
 ports:
@@ -924,16 +917,16 @@ ports:
 
 因为 Service 内部要靠名字区分这些端口（也因为这正是给 Pod 的 `containerPort` 起名的意义）。
 
-### 坑四：Service 的 `port` 在同一个 ClusterIP 上不能重复
+#### 坑四：Service 的 `port` 在同一个 ClusterIP 上不能重复
 
 同一个 Service 内部，两个 `port` 不能一样。但**不同的 Service 可以用相同的 port**——因为它们有不同的 ClusterIP。
 
 ```
-Service A: 10.96.14.7:8080  ✓
-Service B: 10.96.20.3:8080  ✓   ← 不冲突，因为 IP 不同
+Service A: 10.96.14.7:8080  
+Service B: 10.96.20.3:8080     ← 不冲突，因为 IP 不同
 ```
 
-### 坑五：`sessionAffinity` 的取舍
+#### 坑五：`sessionAffinity` 的取舍
 
 默认 `None`——每个 TCP 连接独立选后端。改成 `ClientIP` 后，**同一个客户端 IP 的连接会被固定到同一个 Pod**。
 
@@ -948,7 +941,7 @@ sessionAffinityConfig:
 
 **但更好的做法是：把状态挪到 redis，让应用真正无状态，然后用默认的 `None`。**
 
-#### 先把一个容易漏掉的前提说清楚：负载均衡是"每连接"的，不是"每包"的
+##### 先把一个容易漏掉的前提说清楚：负载均衡是"每连接"的，不是"每包"的
 
 这一点能消除一半的困惑。第 6 章开头讲过，DNAT 只发生在**连接建立的那一刻**：
 
@@ -972,7 +965,7 @@ TCP 三次握手时，内核查规则 → 选中 Pod A → DNAT → 建立连接
 
 **这带来一个重要推论**：如果你的应用是 **WebSocket 或 gRPC 长连接**，那**业务上根本不需要粘性**——一条连接建好之后就固定在那个 Pod 上了。真正会"丢会话"的，是那种**每个请求都新建连接**的短连接场景（普通 HTTP 轮询、表单提交）。
 
-#### 如果你想在这个基础上再做粘性，K8s 给了什么
+##### 如果你想在这个基础上再做粘性，K8s 给了什么
 
 ```yaml
 sessionAffinity: ClientIP
@@ -996,7 +989,7 @@ kubectl patch svc api -n cloudnote -p '{"spec":{"sessionAffinity":"ClientIP"}}'
 iptables -t nat -S | grep -E "recent|KUBE-SVC"
 ```
 
-#### 但 `ClientIP` 有四个坑，第一个是致命的
+##### 但 `ClientIP` 有四个坑，第一个是致命的
 
 | # | 局限 | 后果 |
 |---|---|---|
@@ -1007,7 +1000,7 @@ iptables -t nat -S | grep -E "recent|KUBE-SVC"
 
 **坑 1 的严重程度值得单独强调**：这是一个"平时看不出问题、一到上班高峰就出事"的配置。测试时你自己一个人访问，觉得很正常；上线后整个公司的流量全砸到一个 Pod 上。
 
-#### 三层解法，按优先级排序
+##### 三层解法，按优先级排序
 
 | 优先级 | 做法 | 说明 |
 |---|---|---|
@@ -1024,9 +1017,9 @@ L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
 
 **判据很简单**：如果你的服务是"给不确定的网络环境下的真人用户"用的，**永远选 L7**。第 7 章的 Ingress Controller（Traefik、Contour、Envoy Gateway 等）都支持基于 Cookie 的粘性配置。
 
-> 顺带提醒：曾经最流行的 `ingress-nginx` **已于 2026 年 3 月退役**（不再有安全补丁），选型时不要再新装它。第 7 章会详细讲这件事的来龙去脉。
+顺带提醒：曾经最流行的 `ingress-nginx` **已于 2026 年 3 月退役**（不再有安全补丁），选型时不要再新装它。第 7 章会详细讲这件事的来龙去脉。
 
-#### 那 StatefulSet 那种"必须连特定节点"的需求怎么解
+##### 那 StatefulSet 那种"必须连特定节点"的需求怎么解
 
 这是另一类问题——不是"会话粘性"，而是"**我需要精确地连到某一个特定实例**"（比如 MySQL 主库、Kafka partition leader）。
 
@@ -1034,7 +1027,7 @@ L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
 
 因为粘性的前提是"无所谓连哪个，只要别来回换"；而 StatefulSet 场景的前提是"**我就是要连那一个**"。两者的需求方向正好相反。
 
-### 坑六：`externalTrafficPolicy`（只有 NodePort / LoadBalancer 才有）
+#### 坑六：`externalTrafficPolicy`（只有 NodePort / LoadBalancer 才有）
 
 | 值 | 行为 | 代价 |
 |---|---|---|
@@ -1047,16 +1040,14 @@ L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 6.11 本章要点
 
 1. **Service 解决的是"Pod IP 不可靠"这个根本问题**：给一组短暂的、会变的、可能不健康的 Pod，一个持久的、单一的、只含健康副本的访问入口。
 2. **ClusterIP 不是一个真实地址，而是一组内核里的 TCP/UDP 地址改写规则。**所以它 `ping` 不通却 `curl` 得通——**排查 Service 永远用 TCP 工具，不要用 ping**。
 3. **kube-proxy 是规则写入器，不是代理**。iptables 模式下用 `KUBE-SERVICES → KUBE-SVC-* → KUBE-SEP-*` 三层链做"随机概率"负载均衡；IPVS 模式改用哈希表，性能更好。
 4. **`Endpoints` / `EndpointSlice` 是排查 Service 问题的第一站**——它直接告诉你"Service 到底找到后端了没有"，十有八九的问题都在 `selector` 和 Pod 的 `Ready` 状态上。
 
-### 一张图收尾
+#### 本章全景图
 
 ```
    客户端（另一个 Pod）
@@ -1081,41 +1072,23 @@ L7 Cookie 粘性：看"你是谁"（应用层属性，可以随用户走）
                         Service 对象
 ```
 
-### 自测题
+### 6.12 练习题
 
-1. 为什么不能直接把 Pod IP 写进前端配置？说出三个理由。（积木 6-1）
-2. Service 由哪四部分构成？其中哪一部分是**你从来不手写**的？（积木 6-2）
-3. `selector` 写错一个字符会有什么现象？`kubectl get svc` 会报错吗？（积木 6-3）
-4. Service 连不通，第一个该查什么命令？Endpoints 为 `<none>` 意味着什么？（积木 6-3）
-5. `port` 和 `targetPort` 分别是谁对谁？为什么 `targetPort` 推荐写端口名？（积木 6-4）
-6. 为什么 `ping` ClusterIP 不通，`curl` 却通？这说明了 ClusterIP 的本质是什么？（积木 6-5）
-7. iptables 模式下，`KUBE-SERVICES` / `KUBE-SVC-*` / `KUBE-SEP-*` 三层各负责什么？（积木 6-6）
-8. iptables 模式的负载均衡是轮询吗？为什么大规模集群推荐 IPVS？（积木 6-6）
-9. `LoadBalancer` 类型的底层实现是什么？为什么在本地 kind 集群里它一直 `Pending`？（积木 6-7）
-10. 同 namespace 下为什么写个 `api` 就能解析？`ndots:5` 有什么副作用？（积木 6-8）
-11. Headless Service 的 DNS 返回什么？什么场景必须用它？（积木 6-8）
-12. 一个 Pod `Running` 但 `NotReady` 时，它还在 Service 的转发列表里吗？为什么？（积木 6-9、第 5 章）
-13. 为什么不能用 Service 按 HTTP 路径做路由？那该用什么？（积木 6-10）
-14. 默认的随机负载均衡下，同一个用户的两次请求会到同一个 Pod 吗？"同一个 TCP 连接里的多个请求"呢？（积木 6-10）
-15. `sessionAffinity: ClientIP` 在什么场景下会**彻底失效甚至变成故障**？为什么说 L7 的 Cookie 粘性比它好？（积木 6-10）
-16. 需要"精确连到某一个特定 Pod"（比如 MySQL 主库）时，该用什么？为什么不能用粘性来解决？（积木 6-8、6-10）
-17. "Service 负责内部、Ingress 负责外部"这个说法错在哪？请说出两处纠正。（积木 6-10）
-18. Ingress Controller 自己是怎么被外部访问到的？"只创建 Ingress 对象"为什么没有效果？（积木 6-10、第 4 章控制器模式）
-
-### 下一章预告
-
-**第 7 章：让世界访问你 —— Ingress 与南北向流量**
-
-现在 CloudNote 内部已经通了：`web` 用域名 `api` 就能调后端。但还有一个问题没解决——**用户怎么访问进来？**
-
-> 你总不能告诉用户"请访问 `http://1.2.3.4:31847`"吧？你要的是 `https://note.example.com`。
->
-> 而且路径要分流：`/` 给前端、`/api` 给后端。**Service 是四层的，看不懂路径**，那这一步谁来做？
->
-> 还有 HTTPS 证书——总不能让每个 Pod 都装一遍证书吧？
-
-这一章我们会讲 **Ingress 与 Ingress Controller 的区别**（这是新手最大的困惑点）、路径和域名的路由规则、TLS 终止发生在哪里、以及为什么现在社区在往 **Gateway API** 迁移。最后我们会给 CloudNote 配上一个真实的七层入口。
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 7 章。*
+1. 为什么不能直接把 Pod IP 写进前端配置？说出三个理由。
+2. Service 由哪四部分构成？其中哪一部分是**你从来不手写**的？
+3. `selector` 写错一个字符会有什么现象？`kubectl get svc` 会报错吗？
+4. Service 连不通，第一个该查什么命令？Endpoints 为 `<none>` 意味着什么？
+5. `port` 和 `targetPort` 分别是谁对谁？为什么 `targetPort` 推荐写端口名？
+6. 为什么 `ping` ClusterIP 不通，`curl` 却通？这说明了 ClusterIP 的本质是什么？
+7. iptables 模式下，`KUBE-SERVICES` / `KUBE-SVC-*` / `KUBE-SEP-*` 三层各负责什么？
+8. iptables 模式的负载均衡是轮询吗？为什么大规模集群推荐 IPVS？
+9. `LoadBalancer` 类型的底层实现是什么？为什么在本地 kind 集群里它一直 `Pending`？
+10. 同 namespace 下为什么写个 `api` 就能解析？`ndots:5` 有什么副作用？
+11. Headless Service 的 DNS 返回什么？什么场景必须用它？
+12. 一个 Pod `Running` 但 `NotReady` 时，它还在 Service 的转发列表里吗？为什么？（第 6.9 节、第 5 章）
+13. 为什么不能用 Service 按 HTTP 路径做路由？那该用什么？
+14. 默认的随机负载均衡下，同一个用户的两次请求会到同一个 Pod 吗？"同一个 TCP 连接里的多个请求"呢？
+15. `sessionAffinity: ClientIP` 在什么场景下会**彻底失效甚至变成故障**？为什么说 L7 的 Cookie 粘性比它好？
+16. 需要"精确连到某一个特定 Pod"（比如 MySQL 主库）时，该用什么？为什么不能用粘性来解决？
+17. "Service 负责内部、Ingress 负责外部"这个说法错在哪？请说出两处纠正。
+18. Ingress Controller 自己是怎么被外部访问到的？"只创建 Ingress 对象"为什么没有效果？（第 6.10 节、第 4 章控制器模式）

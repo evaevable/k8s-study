@@ -1,17 +1,8 @@
 # 第 8 章　配置与密钥：ConfigMap 与 Secret
 
-> **本章导读**
-> - 建议用时：55 分钟（含 20 分钟动手）
-> - 前置知识：第 4 章（调和循环）、第 5 章（Deployment）
-> - 读完你应该能回答四个问题：
->   1. **Secret 和 ConfigMap 的本质区别是什么？**（提示：不是"加密与否"）
->   2. 为什么改了 ConfigMap，Pod 里的值**有时候会变、有时候不会变**？
->   3. 为什么"改完 ConfigMap 服务没生效"是最常见的求助问题？怎么根治？
->   4. `subPath` 挂载为什么会成为"改了不生效"的头号元凶？
+配置与镜像的耦合，是容器化过程中最先暴露、也最容易被凑合过去的问题。
 
-先把 CloudNote 现在的问题摆出来。
-
-第 5 章那份 Deployment 里，`image` 是写死的——这没问题。但紧接着这些呢？
+第 5 章那份 Deployment 里，`image` 写死没有问题——镜像本就该是确定的。但紧接着的这几行不同：
 
 ```yaml
 env:
@@ -31,17 +22,17 @@ env:
 | **镜像失去意义** | 镜像本该是**不可变**的（第 1 章讲过），但一旦塞进环境相关配置，同一份镜像在测试和生产行为不同——**"在我机器上是好的"又回来了** |
 | **凭据泄漏** | 密码进了 Git 历史。**从这一刻起，你必须假设它已经泄露了**——删掉文件也没用，它在历史提交里 |
 
-**核心原则一句话**：
+本章的核心原则只有一句：
 
 > **镜像应该只描述"程序是什么"，配置描述"程序在这个环境里怎么跑"。两者必须分离。**
 
-这就是 ConfigMap 和 Secret 存在的理由。
+ConfigMap 与 Secret 正是为此存在。本章会说明两者在结构层几乎完全相同、差异全部落在策略层，并把注入方式（环境变量、卷挂载、`subPath`）各自的更新语义讲清楚——其中 `subPath` 的行为是配置类故障最常见的来源。
 
 ---
 
-## 【积木 8-1】ConfigMap：把配置从镜像里抠出来
+### 8.1 ConfigMap：把配置从镜像里抠出来
 
-### 是什么
+#### 是什么
 
 一个**命名空间级别**的键值对集合。就这么简单。
 
@@ -66,7 +57,7 @@ data:
     }
 ```
 
-### 三种创建方式
+#### 三种创建方式
 
 ```bash
 # 方式一：字面量
@@ -84,9 +75,9 @@ kubectl create configmap app-config -n cloudnote --from-file=./config-dir/
 kubectl get configmap app-config -n cloudnote -o yaml
 ```
 
-> **"从目录创建"这一条很实用**：它把"一个目录里的配置文件"整体变成 ConfigMap。这也是第 2 章那个 init 容器渲染配置的另一种做法。
+**"从目录创建"这一条很实用**：它把"一个目录里的配置文件"整体变成 ConfigMap。这也是第 2 章那个 init 容器渲染配置的另一种做法。
 
-### 一个容易忽略的点：它不只给 Pod 用
+#### 一个容易忽略的点：它不只给 Pod 用
 
 ConfigMap 是**通用的配置对象**。除了 Pod，这些地方也会用它：
 
@@ -101,13 +92,13 @@ kubectl get configmap coredns -n kube-system -o yaml
 
 ---
 
-## 【积木 8-2】Secret 与 ConfigMap 的本质区别（纠正最大误解）
+### 8.2 Secret 与 ConfigMap 的本质区别（纠正最大误解）
 
 这是本章最重要的一块。**网上大多数说法都是错的。**
 
-### 先说错误说法
+#### 先说错误说法
 
-> "ConfigMap 存不敏感的配置，Secret 存加密的敏感信息。"
+"ConfigMap 存不敏感的配置，Secret 存加密的敏感信息。"
 
 **后半句是错的。** Secret **默认不做任何加密**，它只是把值做了 **base64 编码**：
 
@@ -127,7 +118,7 @@ echo U3VwZXJTZWNyZXQxMjM= | base64 -d
 
 **base64 不是加密，是编码。**它的目的只是让二进制安全地在文本协议里传输。**任何人拿到这串字符都能解出原文。**
 
-### 那它到底"保护"了什么
+#### 那它到底"保护"了什么
 
 Secret 相比 ConfigMap 的**真实差异**只有这些：
 
@@ -146,7 +137,7 @@ Secret 相比 ConfigMap 的**真实差异**只有这些：
 >
 > 这些额外保护**默认大多没开**（etcd 静态加密要手动配），所以 **Secret 默认并不安全**。
 
-### `kubectl describe` 的差异（动手验证一下）
+#### `kubectl describe` 的差异（动手验证一下）
 
 ```bash
 kubectl describe configmap app-config -n cloudnote   # 直接看到所有值
@@ -155,7 +146,7 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 
 **这个差异会造成一种虚假的安全感**——"看不到内容，应该安全的"。但 `-o yaml` 一敲，`base64 -d` 一解，密码就在眼前。
 
-### 真正让密码安全的四层做法
+#### 真正让密码安全的四层做法
 
 | 层次 | 手段 | 解决什么 |
 |---|---|---|
@@ -172,13 +163,13 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 
 ---
 
-### 更准确的一句话：它们是"同一个东西的两种身份"
+#### 更准确的一句话：它们是"同一个东西的两种身份"
 
 到这里可以给一个比"一个存配置、一个存密码"精确得多的结论：
 
-> **ConfigMap 和 Secret 在结构层几乎完全一样，差异全部在"策略层"。**
->
-> **它们是同一个数据结构，被分成两个对象，用来承载不同敏感级别的数据。**
+**ConfigMap 和 Secret 在结构层几乎完全一样，差异全部在"策略层"。**
+
+**它们是同一个数据结构，被分成两个对象，用来承载不同敏感级别的数据。**
 
 **结构层（完全一样）**：
 
@@ -201,7 +192,7 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 | etcd 静态加密 | 不参与 | **可被单独加密** |
 | 节点上的存放 | 普通文件 | kubelet 放在 **tmpfs（内存）** |
 
-#### 那为什么不做成一个对象、加个 `sensitive: true` 字段？
+##### 那为什么不做成一个对象、加个 `sensitive: true` 字段？
 
 这是个很好的设计问题，答案能让你理解 K8s 的取舍逻辑：
 
@@ -213,13 +204,13 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 
 **结论**：K8s 用"两个对象"换来了**权限与加密的粒度**。这是一个典型的"多一个对象、换一层控制能力"的取舍。
 
-#### 实用判据：怎么归类
+##### 实用判据：怎么归类
 
 问自己一个问题：
 
-> **这个值如果泄漏出去，会造成损失吗？**
->
-> 会 → **Secret**；不会 → **ConfigMap**
+**这个值如果泄漏出去，会造成损失吗？**
+
+会 → **Secret**；不会 → **ConfigMap**
 
 **两个方向都要小心**：
 
@@ -230,7 +221,7 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 
 **判断标准是"是否敏感"，不是"是否重要"。**一个非常重要的、但公开也不会造成损失的值（比如功能开关、路由表），应该放 ConfigMap——放 Secret 反而会让权限管理变糟。
 
-## 【积木 8-3】Secret 的几种类型
+### 8.3 Secret 的几种类型
 
 `type` 字段决定了这个 Secret 的用途和**必须包含哪些 key**。
 
@@ -243,7 +234,7 @@ kubectl describe secret db-secret -n cloudnote       # 只看到字节数
 | `kubernetes.io/ssh-auth` | SSH 密钥 | `ssh-privatekey` |
 | `kubernetes.io/service-account-token` | ServiceAccount 令牌 | 由系统管理 |
 
-### 顺带讲清一个高频实际问题：私有镜像仓库怎么拉
+#### 顺带讲清一个高频实际问题：私有镜像仓库怎么拉
 
 ```yaml
 apiVersion: v1
@@ -278,7 +269,7 @@ spec:
 
 **这条命令能解决一类很典型的故障**：Pod 一直 `ImagePullBackOff`，`describe` 里写着 `401 Unauthorized`——那就是缺了 `imagePullSecrets`。
 
-### `data` 和 `stringData` 的区别
+#### `data` 和 `stringData` 的区别
 
 | 字段 | 值的形式 | 说明 |
 |---|---|---|
@@ -300,7 +291,7 @@ stringData:              # 写明文更方便，API Server 自动编码
 
 ---
 
-## 【积木 8-4】注入到 Pod 的两种方式
+### 8.4 注入到 Pod 的两种方式
 
 配置有了，怎么送进容器？两条路。
 
@@ -318,7 +309,7 @@ flowchart TB
     N2 -->|"subPath 单文件"| N4["永不更新"]
 ```
 
-### 方式一：环境变量
+#### 方式一：环境变量
 
 ```yaml
 spec:
@@ -350,7 +341,7 @@ spec:
 
 环境变量是在**容器创建时**注入进程的。改 ConfigMap **不会**改变已经在运行的容器里的环境变量——因为环境变量属于进程的启动参数，进程不重启就改不了。
 
-### 方式二：卷挂载
+#### 方式二：卷挂载
 
 ```yaml
 spec:
@@ -388,7 +379,7 @@ spec:
 
 **代价**：应用得自己**监听文件变化**才会重新加载。很多程序启动时读一次配置就再也不看了——**这时候"文件更新了"和"配置生效了"是两件事。**
 
-### 对比表（这一张表值得记住）
+#### 对比表（这一张表值得记住）
 
 | 维度 | 环境变量 | 卷挂载 |
 |---|---|---|
@@ -407,15 +398,15 @@ spec:
 
 ---
 
-## 【积木 8-5】最大的坑：改了 ConfigMap，Pod 不会重启
+### 8.5 最大的坑：改了 ConfigMap，Pod 不会重启
 
 这是导读点名的那个经典陷阱。绝大多数"配置改了没生效"都源于它。
 
-### 为什么会这样
+#### 为什么会这样
 
 回想第 4 章讲的调和循环。Deployment 控制器关注的是什么？
 
-> **`spec.template` 有没有变。**
+**`spec.template` 有没有变。**
 
 你改的是 **ConfigMap 对象**，不是 Deployment 的 `spec.template`。**从 Deployment 的视角看，什么都没发生**——期望副本数还是 2，Pod 模板的哈希还是原来那个，旧 RS 不用动，新 RS 不用建。
 
@@ -435,15 +426,15 @@ kubelet 发现挂载的卷变了 → 更新文件（约 1 分钟）
 |---|---|---|
 | **环境变量** | **不会**（进程启动后固定） | 不适用 |
 | **卷挂载（目录）** | **会**（约 1 分钟） | **看应用**：多数不会 |
-| **卷挂载（subPath）** | **不会**（见积木 8-6） | 不适用 |
+| **卷挂载（subPath）** | **不会**（见第 8.6 节） | 不适用 |
 | **`envFrom`** | 不会 | 不适用 |
 
-### 四种根治方案
+#### 四种根治方案
 
 | 方案 | 做法 | 适用 |
 |---|---|---|
 | **① 手动触发滚动重启** | `kubectl rollout restart deployment/api` | 最简单，适合低频变更 |
-| **② 把版本号写进名字** | ConfigMap 叫 `api-config-v3`，Deployment 引用它；改配置就建 `-v4` 并改引用 | **最稳**，配合 `immutable: true`（积木 8-7） |
+| **② 把版本号写进名字** | ConfigMap 叫 `api-config-v3`，Deployment 引用它；改配置就建 `-v4` 并改引用 | **最稳**，配合 `immutable: true` |
 | **③ 用 checksum 注解** | 模板引擎（Helm）把 ConfigMap 内容的哈希写进 Pod 模板的 annotation | **Helm 项目的标准做法**，改配置自动触发滚动更新 |
 | **④ 装一个 Reloader** | 部署 `stakater/Reloader`，它 watch ConfigMap/Secret 并自动触发引用了它们的 Deployment 重启 | 环境里对象很多时省心 |
 
@@ -460,17 +451,17 @@ spec:
 
 **ConfigMap 内容一变，哈希就变，Pod 模板就"变"了 → 调和循环自然发起一次滚动更新。**这是把"配置"和"部署"两个世界接起来的巧妙手法。
 
-### 一个顺带的提醒：`kubectl rollout restart` 做了什么
+#### 一个顺带的提醒：`kubectl rollout restart` 做了什么
 
 它给 `spec.template.metadata.annotations` 加了一个带时间戳的注解（`kubectl.kubernetes.io/restartedAt`），于是模板哈希变了，触发一次标准的滚动更新。**和第 5 章学的发布流程完全一样**——`maxSurge` / `maxUnavailable` 依然在保护你。
 
 ---
 
-## 【积木 8-6】`subPath` 与目录覆盖：两个真实的血案
+### 8.6 `subPath` 与目录覆盖：两个真实的血案
 
-这两个坑造成的生产事故，比前面积木加起来都多。
+这两个坑造成的生产事故，比本章前面各节加起来都多。
 
-### 血案一：把整个目录挂空了
+#### 血案一：把整个目录挂空了
 
 ```yaml
 # 看起来没问题
@@ -505,7 +496,7 @@ volumes:
           path: default.conf       # 挂成什么文件名
 ```
 
-### 血案二：`subPath` 挂了单文件，但改了永远不生效
+#### 血案二：`subPath` 挂了单文件，但改了永远不生效
 
 如果你想"只覆盖一个文件，不动同目录其他文件"，标准做法是 `subPath`：
 
@@ -518,7 +509,7 @@ volumeMounts:
 
 **它能解决"覆盖整个目录"的问题，但引入了一个更隐蔽的问题：**
 
-> **`subPath` 挂载的文件永远不会被更新。**
+**`subPath` 挂载的文件永远不会被更新。**
 
 原因是实现机制不同：
 
@@ -539,14 +530,14 @@ volumeMounts:
 排查两小时，最后发现是 subPath
 ```
 
-#### "永不更新"的准确含义（一个常见误读）
+##### "永不更新"的准确含义（一个常见误读）
 
 上面那张表容易被读成"subPath 挂载就算重启 Pod 也不更新"。**不是这样。**把时间维度拆开就清楚了：
 
 | 挂载方式 | **不重建 Pod（运行期间）** | **重建 Pod 之后** |
 |---|---|---|
 | **目录挂载** | 约 1 分钟**自动更新**（kubelet 主动同步） | 新值 |
-| **`subPath` 挂载** | **永久停在旧值** | **新值** ✅ |
+| **`subPath` 挂载** | **永久停在旧值** | **新值**  |
 
 **两句话说的是两个不同的时间点**：
 
@@ -574,11 +565,11 @@ subPath 挂载时，kubelet 做了什么：
 
 **这个澄清带来一个很实用的推论：**
 
-> **只要你能接受"改配置 → 手动重启 Pod"这个流程，那 `subPath` 和目录挂载在"重启之后"的行为完全一样。**
->
-> `subPath` 唯一的额外风险是：**你忘了重启时，它会静默地什么都不发生**——而目录挂载至少文件已经变新了，还给你留了"应用可能自己会重载"的机会。
+**只要你能接受"改配置 → 手动重启 Pod"这个流程，那 `subPath` 和目录挂载在"重启之后"的行为完全一样。**
 
-#### 决策建议
+`subPath` 唯一的额外风险是：**你忘了重启时，它会静默地什么都不发生**——而目录挂载至少文件已经变新了，还给你留了"应用可能自己会重载"的机会。
+
+##### 决策建议
 
 | 你的需求 | 用什么 | 说明 |
 |---|---|---|
@@ -586,13 +577,13 @@ subPath 挂载时，kubelet 做了什么：
 | 一份配置文件，希望**不重启**也能自动更新 | **目录挂载**（挂到 `conf.d` 这类专用子目录，别挂父目录） | 文件会自动变；能否生效还看应用会不会重载 |
 | 多个文件，希望自动更新 | **目录挂载 + 专门的挂载点目录** | — |
 
-> **一句话记忆**：**`subPath` 的代价不是"永远拿不到新值"，而是"必须靠重启才能拿到"。**
->
-> 所以如果你用了 `subPath`，就必须把"改配置"和"重启 Pod"绑成一个动作——积木 8-5 那四种方案（`rollout restart` / 版本号命名 + immutable / checksum 注解 / Reloader）随便选一个即可。
+**一句话记忆**：**`subPath` 的代价不是"永远拿不到新值"，而是"必须靠重启才能拿到"。**
 
-**动手验证**：本章【积木 8-8】的实验第四步会看到 `subPath` 挂载停在旧值；第五步重建 Pod 后再看，**它就会变成新值**。这两步连着做，这个知识点就再也不会混了。
+所以如果你用了 `subPath`，就必须把"改配置"和"重启 Pod"绑成一个动作——第 8.5 节那四种方案（`rollout restart` / 版本号命名 + immutable / checksum 注解 / Reloader）随便选一个即可。
 
-### 还有一个小坑：缺失的 ConfigMap 会阻止 Pod 启动
+**动手验证**：本章第 8.8 节的实验第四步会看到 `subPath` 挂载停在旧值；第五步重建 Pod 后再看，**它就会变成新值**。这两步连着做，这个知识点就再也不会混了。
+
+#### 还有一个小坑：缺失的 ConfigMap 会阻止 Pod 启动
 
 ```yaml
 envFrom:
@@ -616,9 +607,9 @@ volumes:
 
 ---
 
-## 【积木 8-7】边界与限制：什么不该放进去
+### 8.7 边界与限制：什么不该放进去
 
-### 三条硬限制
+#### 三条硬限制
 
 | 限制 | 数值/行为 | 影响 |
 |---|---|---|
@@ -626,7 +617,7 @@ volumes:
 | **命名空间隔离** | Pod **只能**引用同命名空间的 ConfigMap/Secret | 跨环境共享配置要各建一份 |
 | **总量** | 都在 etcd 里，计入 etcd 的容量 | 别把 ConfigMap 当小型数据库用 |
 
-### `immutable: true`：一个被低估的好东西
+#### `immutable: true`：一个被低估的好东西
 
 ```yaml
 apiVersion: v1
@@ -648,7 +639,7 @@ immutable: true      # ← 创建后内容不能再改
 
 **代价是**：改了要新建一个对象并更新 Deployment 的引用，**流程变重了**。但对生产环境来说，这个"重"恰恰是好事——它逼你走正规的变更流程。
 
-### 什么不该放进 ConfigMap/Secret
+#### 什么不该放进 ConfigMap/Secret
 
 | 不该放 | 该用什么 |
 |---|---|
@@ -658,11 +649,11 @@ immutable: true      # ← 创建后内容不能再改
 | 高敏感、要求轮转与审计的凭据 | **Vault / 云 KMS** + Secrets Store CSI Driver |
 | 应用自己的运行时状态 | 数据库 / redis |
 
-> **最后一行值得强调**：ConfigMap 是**只读输入**，不是可写存储。把它当"可以读写的小数据库"用（比如让应用往里面写进度），会立刻撞上 `immutable`、并发冲突（第 4 章的乐观并发）、以及"谁在改我的配置"的混乱。**要写状态就写数据库。**
+**最后一行值得强调**：ConfigMap 是**只读输入**，不是可写存储。把它当"可以读写的小数据库"用（比如让应用往里面写进度），会立刻撞上 `immutable`、并发冲突（第 4 章的乐观并发）、以及"谁在改我的配置"的混乱。**要写状态就写数据库。**
 
 ---
 
-## 【积木 8-8】动手：一次实验看清全部三种行为
+### 8.8 动手：一次实验看清全部三种行为
 
 这一个实验把前面所有知识点串起来——**在同一个 Pod 里同时用三种注入方式，改一次 ConfigMap，看哪一路变了**。
 
@@ -674,7 +665,7 @@ bash cases/cloudnote/tools/config-lab.sh
 
 手动流程如下。
 
-### 第一步：创建 ConfigMap 和 Secret
+#### 第一步：创建 ConfigMap 和 Secret
 
 ```bash
 kubectl apply -f cases/cloudnote/00-namespace.yaml
@@ -698,7 +689,7 @@ kubectl get secret api-secret -n cloudnote -o jsonpath='{.data.DB_PASSWORD}' | b
 
 **看到明文了吗？这就是"Secret 默认不是加密"的实证。**记住这个感受——它比任何文字都有说服力。
 
-### 第二步：创建三种注入方式并存的 Pod
+#### 第二步：创建三种注入方式并存的 Pod
 
 ```bash
 kubectl apply -f cases/cloudnote/18-config-demo.yaml
@@ -727,7 +718,7 @@ echo "③ subPath 挂载  /etc/app-single/log.level = $(cat /etc/app-single/log.
 
 三路都应该是初始值。
 
-### 第三步：改 ConfigMap，然后等 90 秒
+#### 第三步：改 ConfigMap，然后等 90 秒
 
 ```bash
 kubectl patch configmap api-config -n cloudnote \
@@ -738,7 +729,7 @@ echo "等待 kubelet 同步（约 1-2 分钟）..."
 sleep 90
 ```
 
-### 第四步：对比三路的结果（本章最关键的一次观察）
+#### 第四步：对比三路的结果（本章最关键的一次观察）
 
 ```bash
 kubectl exec config-demo -n cloudnote -- sh -c '
@@ -753,7 +744,7 @@ echo "③ subPath 挂载  /etc/app-single/log.level = $(cat /etc/app-single/log.
 | 注入方式 | 值 | 结论 |
 |---|---|---|
 | ① 环境变量 | **还是旧值** | **永远不会更新**，必须重建 Pod |
-| ② 目录挂载 | **变成新值** ✅ | **会自动更新**（kubelet 同步） |
+| ② 目录挂载 | **变成新值**  | **会自动更新**（kubelet 同步） |
 | ③ `subPath` 挂载 | **还是旧值** | **永不更新**，这是设计如此 |
 
 **这三行结果，就是本章 80% 的知识点。**
@@ -769,7 +760,7 @@ kubectl exec config-demo -n cloudnote -- ls -la /etc/app/
 
 **为什么要这么麻烦？**因为**原子性**——应用要么看到全部旧值，要么看到全部新值，**不会看到"改了一半"的中间状态**。这是第 4 章"原子性 vs 幂等性"里"单对象原子"的一次工程体现。
 
-### 第五步：用滚动重启让配置真正生效
+#### 第五步：用滚动重启让配置真正生效
 
 ```bash
 # 应用不会自己重载配置，所以要让 Pod 重建
@@ -785,7 +776,7 @@ kubectl exec config-demo -n cloudnote -- sh -c 'echo "重建后的环境变量 L
 
 **重建后环境变量才变成新的值。**这就解释了那个超高频的疑问——"我改了配置，为什么服务行为没变？"
 
-### 第六步：验证"目录覆盖"这个坑
+#### 第六步：验证"目录覆盖"这个坑
 
 ```bash
 # 故意把整个 /etc/nginx 挂空
@@ -819,7 +810,7 @@ kubectl logs nginx-broken -n cloudnote
 kubectl delete pod nginx-broken -n cloudnote
 ```
 
-### 第七步：验证 `optional` 的作用
+#### 第七步：验证 `optional` 的作用
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -862,11 +853,11 @@ kubectl delete -f cases/cloudnote/10-config.yaml
 
 ---
 
-## 【积木 8-9】速查：四步流程 + 四种写法 + 常见报错
+### 8.9 速查：四步流程 + 四种写法 + 常见报错
 
 前面讲的都是"为什么"。这一节是"怎么做"——可以直接照着抄。
 
-### 第 1 步：创建对象
+#### 第 1 步：创建对象
 
 ```bash
 # ConfigMap：三种来源
@@ -897,7 +888,7 @@ kubectl get configmap,secret -n cloudnote
 kubectl get configmap api-config -n cloudnote -o jsonpath='{.data}'    # 看 key 有哪些
 ```
 
-### 第 2 步：在 Pod 里引用（四种写法，语法完全对称）
+#### 第 2 步：在 Pod 里引用（四种写法，语法完全对称）
 
 **① ConfigMap → 环境变量**
 
@@ -976,9 +967,9 @@ spec:
         defaultMode: 0400                # Secret 建议收紧权限
 ```
 
-> **记忆窍门**：把 `configMap` 换成 `secret`、`configMapKeyRef` 换成 `secretKeyRef`、`configMapRef` 换成 `secretRef` 就是另一种。只有一个字段名不规则：**Secret 卷用的是 `secretName` 而不是 `name`**。
+**记忆窍门**：把 `configMap` 换成 `secret`、`configMapKeyRef` 换成 `secretKeyRef`、`configMapRef` 换成 `secretRef` 就是另一种。只有一个字段名不规则：**Secret 卷用的是 `secretName` 而不是 `name`**。
 
-### 第 3 步：验证真的注入进去了
+#### 第 3 步：验证真的注入进去了
 
 ```bash
 # 环境变量进去了吗
@@ -992,7 +983,7 @@ kubectl exec deploy/api -n cloudnote -- cat /etc/app/log.level
 kubectl exec deploy/api -n cloudnote -- ls -la /etc/app/
 ```
 
-### 第 4 步：变更配置的标准流程
+#### 第 4 步：变更配置的标准流程
 
 ```
 ① 改 ConfigMap / Secret
@@ -1012,7 +1003,7 @@ kubectl exec deploy/api -n cloudnote -- ls -la /etc/app/
 
 **更稳的做法**（推荐生产用）：**ConfigMap 名字带版本号 + `immutable: true`**，改配置 = 新建对象 + 改 Deployment 引用。这样"配置变更"和"发布"始终一起发生，不会有人忘记重启。
 
-### 一个完整的集成示例（CloudNote api）
+#### 一个完整的集成示例（CloudNote api）
 
 把本章所有零件拼起来，`api` 的 Deployment 该长这样：
 
@@ -1087,14 +1078,14 @@ spec:
 
 | 片段 | 来自 |
 |---|---|
-| `env` 里用 `configMapKeyRef` / `secretKeyRef` | 积木 8-4 方式一 |
-| `volumeMounts` 挂到 `/etc/app`（专用子目录） | 积木 8-6 血案一（不要挂父目录） |
-| `defaultMode: 0400` | 积木 8-4 的 Secret 收紧权限 |
-| `imagePullSecrets` | 积木 8-3（只认 Secret） |
-| `checksum` 注解（注释掉的那行） | 积木 8-5 方案 ③（根治"改配置不生效"） |
+| `env` 里用 `configMapKeyRef` / `secretKeyRef` | 第 8.4 节方式一 |
+| `volumeMounts` 挂到 `/etc/app`（专用子目录） | 第 8.6 节血案一（不要挂父目录） |
+| `defaultMode: 0400` | 第 8.4 节的 Secret 收紧权限 |
+| `imagePullSecrets` | 第 8.3 节（只认 Secret） |
+| `checksum` 注解（注释掉的那行） | 第 8.5 节方案 ③（根治"改配置不生效"） |
 | `readinessProbe` + `resources` | 第 5 章的生产必备字段清单 |
 
-### 常见报错对照表
+#### 常见报错对照表
 
 | 现象 | 原因 | 怎么查 / 怎么修 |
 |---|---|---|
@@ -1108,20 +1099,18 @@ spec:
 | 挂进去的文件**权限不对**、非 root 容器读不了 | `defaultMode` 默认 0644，属主是 root | 设 `defaultMode`，配合 Pod 级 `securityContext.fsGroup` |
 | `kubectl describe cm` 能看到值，`describe secret` 看不到 | 这是**设计如此**，不是故障 | 用 `-o yaml` + `base64 -d` 看 Secret 内容 |
 
-> **一条排查主线**：出现配置类故障时，按这个顺序走——
->
-> **① 对象存在吗 → ② key 名对吗 → ③ 注入方式是什么（决定要不要重启）→ ④ 挂载路径对不对（有没有覆盖父目录）→ ⑤ 应用会自己重载吗**
+**一条排查主线**：出现配置类故障时，按这个顺序走——
 
-## 【本章小结】
+**① 对象存在吗 → ② key 名对吗 → ③ 注入方式是什么（决定要不要重启）→ ④ 挂载路径对不对（有没有覆盖父目录）→ ⑤ 应用会自己重载吗**
 
-### 四句话总结
+### 8.10 本章要点
 
 1. **Secret 不是"加密的 ConfigMap"。**它默认只是 base64 **编码**，真正多出来的保护是"语义标记 + describe 不显示内容 + 可单独 RBAC + 可选 etcd 静态加密 + 节点上用 tmpfs"。**默认状态下它不安全。**
 2. **配置注入的两条路各有硬约束**：环境变量简单但**永不更新**；目录卷挂载会**自动更新**但需要应用配合监听文件。
 3. **改 ConfigMap 不会触发 Pod 重建**——因为 Deployment 只关心 `spec.template`。根治办法是 `rollout restart`、版本号命名 + immutable、或 checksum 注解。
 4. **`subPath` 挂载在 Pod 运行期间永不更新**（设计如此），**但重建 Pod 后会拿到新值**；**目录挂载是覆盖而非合并**。这两个坑造成的故障，比这一章其他内容加起来都多。
 
-### 一张图收尾
+#### 本章全景图
 
 ```mermaid
 flowchart TB
@@ -1137,41 +1126,23 @@ flowchart TB
     NEED --> FIX["rollout restart<br/>或版本号命名 + immutable<br/>或 checksum 注解"]
 ```
 
-### 自测题
+### 8.11 练习题
 
-1. Secret 和 ConfigMap 的本质区别是什么？为什么说"Secret 是加密的"是错的？（积木 8-2）
-2. 用一条命令把 Secret 里的密码解出来。（积木 8-2）
-3. 为什么"`kubectl describe` 看不到 Secret 内容"会带来虚假的安全感？（积木 8-2）
-4. 让密码真正安全的四层做法分别是什么？（积木 8-2）
-5. ConfigMap 和 Secret 在"结构层"有哪些相同点？为什么 K8s 不把它们合成一个对象？（积木 8-2）
-6. 判断一个值该放 ConfigMap 还是 Secret 的准绳是什么？"过度用 Secret"有什么副作用？（积木 8-2）
-7. `data` 和 `stringData` 有什么区别？哪个是只写字段？（积木 8-3）
-8. 环境变量注入和卷挂载注入，改 ConfigMap 后行为有什么不同？（积木 8-4）
-9. 为什么改了 ConfigMap，Deployment **不会**自动滚动更新？（积木 8-5）
-10. 让"改配置自动触发发布"的三种做法是什么？checksum 注解的原理是什么？（积木 8-5）
-11. 把 ConfigMap 挂到 `/etc/nginx` 会发生什么？为什么？（积木 8-6）
-12. `subPath` 挂载为什么在运行期间永不更新？**重建 Pod 之后会更新吗？**为什么？（积木 8-6）
-13. `optional: true` 解决什么问题？（积木 8-6）
-14. ConfigMap 的大小上限是多少？哪些东西不该放进去？（积木 8-7）
-15. `immutable: true` 有什么好处和代价？（积木 8-7）
-16. 私有镜像仓库的凭据该怎么配？Pod 报 `ImagePullBackOff` + `401` 时先看什么？（积木 8-3）
-17. ConfigMap 转成 Secret 引用，需要改哪三个字段名？**哪个字段名不规则？**（积木 8-9）
-18. Pod 卡在 `CreateContainerConfigError` 时，你的排查顺序是什么？（积木 8-9）
-
-### 下一章预告
-
-**第 9 章：数据要持久 —— Volume、PV、PVC、StorageClass**
-
-配置解决了。但 CloudNote 还有一个更严重的问题没解决——**数据在哪？**
-
-第 2 章讲过：`emptyDir` 随 Pod 生命周期，**Pod 一删，里面什么都没了**。而 CloudNote 的 `postgres` 是要存用户笔记的。
-
-> 那用 `hostPath` 挂到节点目录上？**Pod 换个节点，数据就找不到了。**
->
-> 那怎么办？让存储"跟着 Pod 走"吗？还是让 Pod"跟着存储走"？
-
-这一章会讲清楚 K8s 存储最核心的三层抽象——**Volume、PV、PVC** 各自解决什么问题、为什么要有 `StorageClass`（让存储像 Pod 一样被"动态供给"）、`accessModes`（RWO / ROX / RWX）的真实含义和常见误解、以及 **StatefulSet 为什么必须配 PVC**（为第 13 章铺路）。
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 9 章。*
+1. Secret 和 ConfigMap 的本质区别是什么？为什么说"Secret 是加密的"是错的？
+2. 用一条命令把 Secret 里的密码解出来。
+3. 为什么"`kubectl describe` 看不到 Secret 内容"会带来虚假的安全感？
+4. 让密码真正安全的四层做法分别是什么？
+5. ConfigMap 和 Secret 在"结构层"有哪些相同点？为什么 K8s 不把它们合成一个对象？
+6. 判断一个值该放 ConfigMap 还是 Secret 的准绳是什么？"过度用 Secret"有什么副作用？
+7. `data` 和 `stringData` 有什么区别？哪个是只写字段？
+8. 环境变量注入和卷挂载注入，改 ConfigMap 后行为有什么不同？
+9. 为什么改了 ConfigMap，Deployment **不会**自动滚动更新？
+10. 让"改配置自动触发发布"的三种做法是什么？checksum 注解的原理是什么？
+11. 把 ConfigMap 挂到 `/etc/nginx` 会发生什么？为什么？
+12. `subPath` 挂载为什么在运行期间永不更新？**重建 Pod 之后会更新吗？**为什么？
+13. `optional: true` 解决什么问题？
+14. ConfigMap 的大小上限是多少？哪些东西不该放进去？
+15. `immutable: true` 有什么好处和代价？
+16. 私有镜像仓库的凭据该怎么配？Pod 报 `ImagePullBackOff` + `401` 时先看什么？
+17. ConfigMap 转成 Secret 引用，需要改哪三个字段名？**哪个字段名不规则？**
+18. Pod 卡在 `CreateContainerConfigError` 时，你的排查顺序是什么？

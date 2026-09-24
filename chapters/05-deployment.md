@@ -1,29 +1,22 @@
 # 第 5 章　把应用跑起来：Deployment 与滚动更新
 
-> **本章导读**
-> - 建议用时：60 分钟（含 25 分钟动手）
-> - 前置知识：第 2 章（Pod 是一次性的）、第 4 章（调和循环、幂等、Deployment→RS→Pod 三层链）
-> - 读完你应该能回答四个问题：
->   1. 改了镜像之后，**具体是谁、按什么节奏**把旧 Pod 换成新 Pod 的？
->   2. `maxSurge` 和 `maxUnavailable` 分别在控什么？什么情况下该把它们设成多少？
->   3. 为什么 `kubectl rollout undo` 能在**几秒内**回到旧版本，而不需要重新构建镜像？
->   4. Deployment 为什么会"卡住十分钟不动"？卡住时服务还可用吗？
+第 4 章说明了控制器如何思考。从本章开始，原理要落成可执行的操作：把一个真实应用发布出去，观察它滚动更新，再故意发布一个坏版本并回滚。
 
-第 4 章我们讲完了"控制器怎么思考"。这一章开始，**思考终于要变成行动了**——我们要把一个真实的应用发布出去，看着它滚动更新，然后故意发一个坏版本，再把它回滚掉。
+Deployment 是 Kubernetes 中使用频率最高的对象，也是最容易"会写但不理解"的对象。本章沿着它的工作方式展开：它为什么不直接创建 Pod，而要经过 ReplicaSet；`maxSurge` 与 `maxUnavailable` 这两个数字如何决定发布的节奏与风险；就绪探针在其中扮演什么角色；以及 `kubectl rollout undo` 回滚的究竟是什么。
 
-准备工作在第 2 章和第 4 章已经做完了：
+所需的前置结论已经具备：
 
-| 第 2 章告诉我们 | 第 4 章告诉我们 |
+| 第 2 章的结论 | 第 4 章的结论 |
 |---|---|
 | 裸 Pod 删了不会回来 | ReplicaSet 保证"数量"准确 |
 | Pod 是一次性的，改不了就重建 | 控制器靠"数数"来决定做什么 |
 | Pod IP 不稳定 | 冲突是正常的，重来就行 |
 
-现在我们缺的只有一样东西：**版本**。
+还缺的只有一样东西：**版本**。
 
 ---
 
-## 【积木 5-1】Deployment 到底多做了哪两件事
+### 5.1 Deployment 到底多做了哪两件事
 
 先看 ReplicaSet 已经能做什么。如果直接用 ReplicaSet 管理应用，你得到的是：
 
@@ -41,25 +34,25 @@ Deployment 在 ReplicaSet 之上补了两件事：
 
 再加上它继承自 ReplicaSet 的副本保证，Deployment 一共提供四件事：
 
-> **副本保证 + 滚动更新 + 版本历史 + 回滚。**
+**副本保证 + 滚动更新 + 版本历史 + 回滚。**
 
 所以一句话定义：
 
 > **Deployment 是"无状态应用的版本管理器"。**它管理的是"某个镜像的某个版本，应该有多少份同时在跑"。
 
-> 关键词是**无状态**。如果你的应用需要"稳定的身份 + 独立的存储 + 有序启停"（数据库、消息队列），那要用第 13 章的 **StatefulSet**。Deployment 建立的假设是：**所有副本完全对等、可以随便替换任何一个。**
+关键词是**无状态**。如果你的应用需要"稳定的身份 + 独立的存储 + 有序启停"（数据库、消息队列），那要用第 13 章的 **StatefulSet**。Deployment 建立的假设是：**所有副本完全对等、可以随便替换任何一个。**
 
 ---
 
-## 【积木 5-2】把一个真实的 Deployment 逐行看懂
+### 5.2 把一个真实的 Deployment 逐行看懂
 
-这是 CloudNote 的 `api` 服务在生产上的 Deployment。**每一行都有理由**，我们逐个说。
+下面是 CloudNote 的 `api` 服务在生产环境的 Deployment。每一行都有理由，逐个说明。
 
 文件位置：`cases/cloudnote/20-api-deployment.yaml`
 
-> **一个说明**：CloudNote 真实的 `api` 镜像监听 **8080**。但为了让本章实验在**任何机器上都能直接跑起来**（不需要私有镜像仓库），下面这份清单用公开的 `nginx` 镜像代替——它默认监听 **80**。
->
-> 等你换成真实镜像时，把 `containerPort`、探针端口、以及后面 Service 的 `targetPort` 一起改成 `8080` 即可。**除此之外的每一个字段，都是生产可直接照抄的。**
+**一个说明**：CloudNote 真实的 `api` 镜像监听 **8080**。但为了让本章实验在**任何机器上都能直接跑起来**（不需要私有镜像仓库），下面这份清单用公开的 `nginx` 镜像代替——它默认监听 **80**。
+
+等你换成真实镜像时，把 `containerPort`、探针端口、以及后面 Service 的 `targetPort` 一起改成 `8080` 即可。**除此之外的每一个字段，都是生产可直接照抄的。**
 
 ```yaml
 apiVersion: apps/v1
@@ -125,11 +118,11 @@ spec:
             periodSeconds: 10
 ```
 
-### ① `selector` 和 `template.labels` 的关系是硬约束
+#### ① `selector` 和 `template.labels` 的关系是硬约束
 
 这是新手最容易踩的坑，而且**报错信息不友好**。规则是：
 
-> **`spec.selector.matchLabels` 必须能匹配到 `spec.template.metadata.labels`。否则 API Server 直接拒绝创建。**
+**`spec.selector.matchLabels` 必须能匹配到 `spec.template.metadata.labels`。否则 API Server 直接拒绝创建。**
 
 为什么？回到第 4 章那个实验——ReplicaSet 是靠标签"数数"的。如果 `selector` 认领不到自己的 Pod，会发生两件灾难性的事：
 
@@ -144,17 +137,17 @@ The Deployment "api" is invalid: spec.template.metadata.labels: Invalid value:
 `selector` does not match template `labels`
 ```
 
-> **还有一个更隐蔽的坑：`selector` 创建后不可修改。**它是 **immutable** 的。
->
-> ```bash
-> kubectl patch deployment api -n cloudnote \
->   -p '{"spec":{"selector":{"matchLabels":{"app":"api2"}}}}'
-> # The Deployment "api" is invalid: spec.selector: Invalid value: ... field is immutable
-> ```
->
-> 为什么不让改？因为改了选择器，意味着"这个 Deployment 从此认领另外一批 Pod"。K8s 无法安全地判断"那原来那批 Pod 该怎么办"，所以干脆禁止，让你删掉重建。
+**还有一个更隐蔽的坑：`selector` 创建后不可修改。**它是 **immutable** 的。
 
-### ② `strategy` 里的两个数字，是本章的核心
+```bash
+kubectl patch deployment api -n cloudnote \
+  -p '{"spec":{"selector":{"matchLabels":{"app":"api2"}}}}'
+# The Deployment "api" is invalid: spec.selector: Invalid value: ... field is immutable
+```
+
+为什么不让改？因为改了选择器，意味着"这个 Deployment 从此认领另外一批 Pod"。K8s 无法安全地判断"那原来那批 Pod 该怎么办"，所以干脆禁止，让你删掉重建。
+
+#### ② `strategy` 里的两个数字，是本章的核心
 
 ```yaml
 strategy:
@@ -169,17 +162,17 @@ strategy:
 
 这两个值组合起来的效果是：**先建新的，等它就绪，再删旧的——全程可用副本数不低于 replicas。**这是最保守、最安全、最适合面向用户服务的配置。代价是**发布时需要额外的资源**（峰值 5 个 Pod 而不是 4 个）。
 
-积木 5-4 会把这个过程走一遍。
+第 5.4 节会把这个过程走一遍。
 
-### ③ `revisionHistoryLimit` 决定了"能回滚多远"
+#### ③ `revisionHistoryLimit` 决定了"能回滚多远"
 
 默认 10。它的物理含义是：**保留多少个旧 ReplicaSet。**
 
-**旧 ReplicaSet 不是"日志"，它是能直接复活的实体**——这就是回滚能秒级完成的原因（积木 5-7）。
+**旧 ReplicaSet 不是"日志"，它是能直接复活的实体**——这就是回滚能秒级完成的原因。
 
 如果把它设成 `0`，那你就**失去了回滚能力**（旧 RS 会被立即清理）。这是一个非常危险的"优化"。
 
-### ④ `progressDeadlineSeconds` 决定了"卡住多久算失败"
+#### ④ `progressDeadlineSeconds` 决定了"卡住多久算失败"
 
 默认 600 秒。它不"杀死"任何东西，只是**给 Deployment 打一个标记**：
 
@@ -187,13 +180,13 @@ strategy:
 Progressing   False   ProgressDeadlineExceeded
 ```
 
-**注意：它不会自动回滚。**积木 5-8 会专门讲这个坑。
+**注意：它不会自动回滚。**第 5.8 节会专门讲这个坑。
 
 ---
 
-## 【积木 5-3】发布时，三层是怎么接力的
+### 5.3 发布时，三层是怎么接力的
 
-第 4 章我们画过 Deployment → ReplicaSet → Pod 的链条。现在看它在**发布时**的具体分工：
+第 4 章给出过 Deployment → ReplicaSet → Pod 的链条。下面看它在**发布时**的具体分工：
 
 ```mermaid
 flowchart TB
@@ -231,11 +224,11 @@ kubectl get rs -n cloudnote -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}
 
 ---
 
-## 【积木 5-4】滚动更新的节奏：maxSurge 与 maxUnavailable
+### 5.4 滚动更新的节奏：maxSurge 与 maxUnavailable
 
-现在把积木 5-2 的 `maxSurge: 1` / `maxUnavailable: 0` 和 4 个副本走一遍完整过程。
+现在把第 5.2 节的 `maxSurge: 1` / `maxUnavailable: 0` 和 4 个副本走一遍完整过程。
 
-### 先把两条不变量写清楚
+#### 先把两条不变量写清楚
 
 ```
 允许的 Pod 总数上限  = replicas + maxSurge        = 4 + 1 = 5
@@ -244,7 +237,7 @@ kubectl get rs -n cloudnote -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}
 
 **Deployment 控制器每做一步，都要检查这两条不变量。**这是理解整个滚动过程的钥匙——**它不是"按固定脚本走"，而是"在约束内尽可能地推进"。**
 
-### 循环：每换一个副本，走三步
+#### 循环：每换一个副本，走三步
 
 ```mermaid
 flowchart TB
@@ -261,22 +254,22 @@ flowchart TB
 | 时刻 | 旧 RS | 新 RS | 总 Pod | 可用 Pod | 动作 | 检查 |
 |---|---|---|---|---|---|---|
 | T0 | 4 | 0 | 4 | 4 | 开始 | — |
-| T1 | 4 | 1 | 5 | 4 | 扩新 RS | 总 5 ≤ 5 ✓ |
+| T1 | 4 | 1 | 5 | 4 | 扩新 RS | 总 5 ≤ 5  |
 | T2 | 4 | 1 | 5 | **5** | 新 Pod 就绪 | — |
-| T3 | 3 | 1 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4 ✓ |
-| T4 | 3 | 2 | 5 | 4 | 扩新 RS | 总 5 ≤ 5 ✓ |
+| T3 | 3 | 1 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4  |
+| T4 | 3 | 2 | 5 | 4 | 扩新 RS | 总 5 ≤ 5  |
 | T5 | 3 | 2 | 5 | 5 | 新 Pod 就绪 | — |
-| T6 | 2 | 2 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4 ✓ |
-| T7 | 2 | 3 | 5 | 4 | 扩新 RS | 总 5 ≤ 5 ✓ |
+| T6 | 2 | 2 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4  |
+| T7 | 2 | 3 | 5 | 4 | 扩新 RS | 总 5 ≤ 5  |
 | T8 | 2 | 3 | 5 | 5 | 新 Pod 就绪 | — |
-| T9 | 1 | 3 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4 ✓ |
-| T10 | 1 | 4 | 5 | 4 | 扩新 RS | 总 5 ≤ 5 ✓ |
+| T9 | 1 | 3 | 4 | 4 | 缩旧 RS | 可用 4 ≥ 4  |
+| T10 | 1 | 4 | 5 | 4 | 扩新 RS | 总 5 ≤ 5  |
 | T11 | 1 | 4 | 5 | 5 | 新 Pod 就绪 | — |
 | T12 | 0 | 4 | 4 | 4 | 缩旧 RS，**完成** | — |
 
 **注意 T2 那一刻**：可用 Pod 数是 **5**，比期望的 4 还多。这就是 `maxSurge` 换来的"缓冲"——**永远多一个已在线的，才敢删旧的。**
 
-### 换一组参数会怎样
+#### 换一组参数会怎样
 
 `maxSurge: 0` / `maxUnavailable: 1`（适合资源紧张的集群）：
 
@@ -288,7 +281,7 @@ flowchart TB
 
 **代价是发布期间只有 3 个副本在扛流量。**集群资源快满了、加不出第 5 个 Pod 时，这是唯一的选择。
 
-### 四个参数速查
+#### 四个参数速查
 
 | maxSurge | maxUnavailable | 效果 | 适用 |
 |---|---|---|---|
@@ -298,10 +291,10 @@ flowchart TB
 | `100%` | `100%` | 等于全删全建 | 不如直接用 Recreate |
 | `0` | `0` | **非法**！API Server 会拒绝 | — |
 
-> **最后一行要记住**：`maxSurge` 和 `maxUnavailable` **不能同时为 0**。
-> 逻辑上很好理解：两个都锁死，控制器既不能多建一个、也不能少一个，那它就**永远无法推进**，只能死锁。
+**最后一行要记住**：`maxSurge` 和 `maxUnavailable` **不能同时为 0**。
+逻辑上很好理解：两个都锁死，控制器既不能多建一个、也不能少一个，那它就**永远无法推进**，只能死锁。
 
-### 并且：什么时候用 `Recreate`
+#### 并且：什么时候用 `Recreate`
 
 ```yaml
 strategy:
@@ -322,11 +315,11 @@ strategy:
 
 ---
 
-## 【积木 5-5】真正的"刹车"是就绪探针
+### 5.5 真正的"刹车"是就绪探针
 
 上面那个循环里，第 2 步是"**等新 Pod Ready**"。这里有个容易被忽略的关键点：
 
-> **"Ready" 是谁说了算？**
+**"Ready" 是谁说了算？**
 
 **不是"容器启动了"，而是"就绪探针通过了"。**
 
@@ -340,24 +333,24 @@ strategy:
 **所以滚动更新的速度，实际上是由你的就绪探针决定的：**
 
 - 探针太宽松 → 发布很快，但可能把没准备好的 Pod 加进负载均衡
-- 探针太严格 → 发布很慢，甚至卡住（积木 5-8）
+- 探针太严格 → 发布很慢，甚至卡住
 
-> 一个实用的默认配置：
-> ```yaml
-> readinessProbe:
->   httpGet: { path: /healthz, port: http }
->   initialDelaySeconds: 2    # 起容器后先等 2 秒再探
->   periodSeconds: 3          # 之后每 3 秒探一次
->   failureThreshold: 3       # 连续失败 3 次才算"不健康"
->   successThreshold: 1       # 成功 1 次就算"恢复健康"
-> ```
-> 第 11 章会把三种探针（liveness / readiness / startup）彻底讲清，并告诉你**探针配错会怎样把整个服务搞挂**。这里先记住一句：**滚动更新能不能顺利推进，取决于 readinessProbe。**
+一个实用的默认配置：
+```yaml
+readinessProbe:
+  httpGet: { path: /healthz, port: http }
+  initialDelaySeconds: 2    # 起容器后先等 2 秒再探
+  periodSeconds: 3          # 之后每 3 秒探一次
+  failureThreshold: 3       # 连续失败 3 次才算"不健康"
+  successThreshold: 1       # 成功 1 次就算"恢复健康"
+```
+第 11 章会把三种探针（liveness / readiness / startup）彻底讲清，并告诉你**探针配错会怎样把整个服务搞挂**。这里先记住一句：**滚动更新能不能顺利推进，取决于 readinessProbe。**
 
 ---
 
-## 【积木 5-6】动手：发布、观察、搞坏、回滚
+### 5.6 动手：发布、观察、搞坏、回滚
 
-> 需要先按第 1 章【积木 1-10】起一个集群。**这个实验不依赖任何外部镜像仓库**——它用同一个镜像改环境变量来触发发布，用不存在的镜像标签来制造故障。
+本节实验需要一个集群，搭建方式见第 1.10 节。**这个实验不依赖任何外部镜像仓库**——它用同一个镜像改环境变量来触发发布，用不存在的镜像标签来制造故障。
 
 配套脚本：
 
@@ -367,7 +360,7 @@ bash cases/cloudnote/tools/rollout-lab.sh
 
 下面是可以手动一步步做的完整流程。
 
-### 第一步：发布 v1
+#### 第一步：发布 v1
 
 ```bash
 kubectl apply -f cases/cloudnote/00-namespace.yaml
@@ -380,7 +373,7 @@ kubectl get rs -n cloudnote
 
 你会看到 **1 个 ReplicaSet**（名字是 `api-<哈希>`）。
 
-### 第二步：改一个环境变量，触发一次发布
+#### 第二步：改一个环境变量，触发一次发布
 
 ```bash
 # 注意时间：记录这一刻
@@ -399,7 +392,7 @@ watch -n1 'kubectl get rs -n cloudnote'
 - 新的 Pod 名字带有新的哈希前缀（同一批 Pod 的哈希是一致的）
 - `kubectl get rs` 里出现了**第二个 ReplicaSet**，旧的副本数逐步降到 0（**但不会被删除**）
 
-### 第三步：验证"旧的 ReplicaSet 还活着"
+#### 第三步：验证"旧的 ReplicaSet 还活着"
 
 ```bash
 # 两个 RS，一个新的有副本、一个 0 副本
@@ -411,7 +404,7 @@ kubectl get rs -n cloudnote -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}
 
 **关键观察：旧的 ReplicaSet 仍然存在，副本数为 0。**它不是被删除了，只是"下班了"。**这就是回滚能秒级完成的物理基础。**
 
-### 第四步：查看版本历史
+#### 第四步：查看版本历史
 
 ```bash
 kubectl rollout history deployment/api -n cloudnote
@@ -425,14 +418,14 @@ REVISION  CHANGE-CAUSE
 2         <none>
 ```
 
-> `CHANGE-CAUSE` 默认是空的，除非你在 `kubectl` 命令里加上 `--record`（已弃用）或者给它打注解：
-> ```bash
-> kubectl annotate deployment/api -n cloudnote \
->   kubernetes.io/change-cause="升级到 v2" --overwrite
-> ```
-> **生产上强烈建议每次都写 change-cause。**半年后的你，会感谢现在的你。
+`CHANGE-CAUSE` 默认是空的，除非你在 `kubectl` 命令里加上 `--record`（已弃用）或者给它打注解：
+```bash
+kubectl annotate deployment/api -n cloudnote \
+  kubernetes.io/change-cause="升级到 v2" --overwrite
+```
+**生产上强烈建议每次都写 change-cause。**半年后的你，会感谢现在的你。
 
-### 第五步：制造一个坏版本
+#### 第五步：制造一个坏版本
 
 ```bash
 # 用一个不存在的镜像标签 —— 效果等同于"CI 推错了 tag"
@@ -457,7 +450,7 @@ kubectl get endpoints api -n cloudnote
 # 后端列表里仍然是那 2 个健康的旧 Pod
 ```
 
-### 第六步：看一眼"卡住的标记"
+#### 第六步：看一眼"卡住的标记"
 
 ```bash
 kubectl describe deploy api -n cloudnote | sed -n '/Conditions/,$p'
@@ -479,7 +472,7 @@ Conditions:
 >
 > **必须手动 `kubectl rollout undo`。**
 
-### 第七步：回滚（感受一下有多快）
+#### 第七步：回滚（感受一下有多快）
 
 ```bash
 # 先记时间
@@ -507,7 +500,7 @@ kubectl rollout history deployment/api -n cloudnote
 
 **注意历史记录的变化**：回滚**不是**产生第 3 个 revision，而是**把 revision 1 重新激活**。所以 `history` 里可能只剩 2 条，但 `REVISION` 编号会变成 3 —— **因为 K8s 把这次"回滚"记录为一次新的版本事件。**
 
-### 第八步：回滚到指定版本
+#### 第八步：回滚到指定版本
 
 ```bash
 # 看看有哪些版本
@@ -517,7 +510,7 @@ kubectl rollout history deployment/api -n cloudnote
 kubectl rollout undo deployment/api -n cloudnote --to-revision=1
 ```
 
-### 第九步：验证 `revisionHistoryLimit` 真的在起作用
+#### 第九步：验证 `revisionHistoryLimit` 真的在起作用
 
 ```bash
 # 连续改 5 次环境变量，产生多个 RS
@@ -537,7 +530,7 @@ kubectl get rs -n cloudnote
 
 **你会看到旧的 ReplicaSet 被删除了**，只剩下最近 2 个。**这也意味着：你再也回不到更早的版本了。**
 
-### 第十步：观察 `maxSurge` 的作用
+#### 第十步：观察 `maxSurge` 的作用
 
 ```bash
 kubectl patch deployment/api -n cloudnote -p '{"spec":{"replicas":4}}'
@@ -563,11 +556,11 @@ kubectl delete deployment api -n cloudnote
 
 ---
 
-## 【积木 5-7】为什么回滚能这么快：一次彻底的机制拆解
+### 5.7 为什么回滚能这么快：一次彻底的机制拆解
 
 上面实验里最震撼的一点，值得单独拿出来讲清楚。
 
-### 传统发布 vs K8s 发布
+#### 传统发布 vs K8s 发布
 
 | 步骤 | 传统运维 | K8s |
 |---|---|---|
@@ -589,7 +582,7 @@ kubectl delete deployment api -n cloudnote
 
 **"回滚"在 K8s 里不是一次"部署"，而是两个数字的调整。**而第 4 章讲过，调整数字正是调和循环最擅长的事——**幂等、瞬间、可重复。**
 
-### 三个必须知道的限制
+#### 三个必须知道的限制
 
 **限制一：回滚只能回到"还在历史里的版本"。**
 
@@ -603,15 +596,15 @@ kubectl delete deployment api -n cloudnote
 
 如果你在同一次发布里既改了镜像又改了配置，`rollout undo` **只回滚 Deployment 的模板**。ConfigMap 的变更不会跟着回退——**它们是独立的对象**。
 
-> **实践建议**：把"应用版本"和"配置版本"分开管理（比如都给 ConfigMap 名字带上版本号 `app-config-v3`），这样回滚 Deployment 时，配置也跟着换回去。
+**实践建议**：把"应用版本"和"配置版本"分开管理（比如都给 ConfigMap 名字带上版本号 `app-config-v3`），这样回滚 Deployment 时，配置也跟着换回去。
 
 ---
 
-## 【积木 5-8】为什么 Deployment 会"卡住十分钟不动"
+### 5.8 为什么 Deployment 会"卡住十分钟不动"
 
 现在正面回答导读的第四个问题。
 
-### 卡住的三种典型原因
+#### 卡住的三种典型原因
 
 ```mermaid
 flowchart TB
@@ -625,7 +618,7 @@ flowchart TB
     G -->|"否"| I["看 Deployment 的 Events<br/>以及 controller-manager 日志"]
 ```
 
-### 一张排错命令表
+#### 一张排错命令表
 
 ```bash
 # ① 看 Deployment 的状态与 Conditions
@@ -645,7 +638,7 @@ kubectl describe pod <没就绪的Pod名> -n cloudnote | sed -n '/Events/,$p'
 kubectl logs <没就绪的Pod名> -n cloudnote --tail=50
 ```
 
-### 卡住时，服务还可用吗
+#### 卡住时，服务还可用吗
 
 **这是最关键的问题，答案是：正常情况下可用。**
 
@@ -659,9 +652,9 @@ kubectl logs <没就绪的Pod名> -n cloudnote --tail=50
 
 **所以 `maxUnavailable: 0` 的第二个价值就是：发布失败时它是"安全气囊"。**你损失的是时间（没发成），不是可用性。
 
-> **反过来说，`maxUnavailable: 100%` 是生产事故的常见配方**——它等于"先全删再全建"，只要有一步出问题就是全站不可用。
+**反过来说，`maxUnavailable: 100%` 是生产事故的常见配方**——它等于"先全删再全建"，只要有一步出问题就是全站不可用。
 
-### 卡住之后怎么办
+#### 卡住之后怎么办
 
 1. **修好根因**（改镜像 tag、加资源、修探针），滚动更新会自动继续——**不需要重新触发**
 2. **或者放弃，直接回滚**：`kubectl rollout undo deployment/api`
@@ -681,11 +674,11 @@ kubectl rollout resume deployment/api -n cloudnote   # 一次性触发一轮发�
 
 ---
 
-## 【积木 5-9】生产上的 Deployment 该怎么写
+### 5.9 生产上的 Deployment 该怎么写
 
 最后一节，把经验直接给你。
 
-### 必备字段清单
+#### 必备字段清单
 
 | 字段 | 为什么必须有 | 缺了会怎样 |
 |---|---|---|
@@ -698,7 +691,7 @@ kubectl rollout resume deployment/api -n cloudnote   # 一次性触发一轮发�
 | `annotations.kubernetes.io/change-cause` | 版本历史可读 | 半年后你看着 revision 3 不知道是什么 |
 | 多副本（`replicas ≥ 2`） | 单副本发布时会短暂中断 | 发布期间 100% 不可用 |
 
-### 五个常见反模式
+#### 五个常见反模式
 
 | 反模式 | 后果 | 正确做法 |
 |---|---|---|
@@ -708,7 +701,7 @@ kubectl rollout resume deployment/api -n cloudnote   # 一次性触发一轮发�
 | 没有 `readinessProbe` | 发布期间用户看到 502 | 必须配 |
 | 用 Deployment 跑数据库 | Pod 重建后 IP 和身份全变、数据可能丢 | 用 StatefulSet（第 13 章） |
 
-### 和邻居的关系
+#### 和邻居的关系
 
 Deployment 从来不单独工作。它在 CloudNote 里的位置是：
 
@@ -726,16 +719,14 @@ HPA（第 12 章）
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 5.10 本章要点
 
 1. **Deployment = 副本保证 + 滚动更新 + 版本历史 + 回滚**，它管的是"某个版本的镜像该有多少份在跑"，前提是应用**无状态**。
 2. **滚动更新的本质是新旧两个 ReplicaSet 的副本数此消彼长**，而 `maxSurge` / `maxUnavailable` 定义了这场此消彼长的两条边界：总 Pod ≤ `replicas + maxSurge`，可用 Pod ≥ `replicas - maxUnavailable`。
 3. **回滚之所以秒级完成，是因为旧 ReplicaSet 一直存在（副本为 0），"回滚"只是把两个数字对调**——不需要重新构建、不需要重跑 CI。但它**不回滚数据、不回滚 ConfigMap**。
 4. **`progressDeadlineSeconds` 超时只是打个标记，绝不自动回滚**。而且因为有 `maxUnavailable` 保护，**卡住时服务通常仍然可用**——你损失的是时间，不是可用性。
 
-### 一张图收尾
+#### 本章全景图
 
 ```
                  kubectl set image deployment/api api=v2
@@ -764,35 +755,17 @@ HPA（第 12 章）
          (旧 RS 保留，副本 0)      (rollout undo 秒级回去)
 ```
 
-### 自测题
+### 5.11 练习题
 
-1. Deployment 相比 ReplicaSet，多提供了哪两件事？（积木 5-1）
-2. `spec.selector` 和 `spec.template.metadata.labels` 之间是什么关系？为什么 `selector` 被设计成不可修改？（积木 5-2）
-3. 滚动更新时，Deployment 控制器**直接**管理的是什么？（积木 5-3）
-4. ReplicaSet 名字里的那串随机字符是什么？它有什么用？（积木 5-3）
-5. `replicas=4, maxSurge=1, maxUnavailable=0` 时，滚动过程中总 Pod 数最多几个？可用 Pod 数最少几个？（积木 5-4）
-6. 为什么 `maxSurge` 和 `maxUnavailable` 不能同时为 0？（积木 5-4）
-7. 什么场景应该用 `Recreate` 而不是 `RollingUpdate`？（积木 5-4）
-8. 没有 `readinessProbe` 时，Pod 什么时候会被认为 Ready？会造成什么后果？（积木 5-5）
-9. 为什么 `kubectl rollout undo` 不需要重新构建镜像？（积木 5-6、5-7）
-10. 回滚不能挽回哪些东西？举两个例子。（积木 5-7）
-11. `ProgressDeadlineExceeded` 出现后，K8s 会自动回滚吗？会导致服务不可用吗？（积木 5-8）
-12. `kubectl rollout pause` 在什么场景下有用？（积木 5-8）
-
-### 下一章预告
-
-**第 6 章：Pod 之间怎么说话 —— Service、DNS 与数据面**
-
-现在 CloudNote 的 `api` 已经跑起来了，2 个 Pod 在跑，IP 是 `10.244.1.7` 和 `10.244.2.9`。
-
-然后问题来了：
-
-> **`web` 前端要调用 `api`，它该连哪个 IP？**两个 IP 写死一个？那这个 Pod 挂了重建之后 IP 变了怎么办？两个副本想轮流用怎么办？
->
-> 还记得第 3 章【积木 3-1】那条六跳链路里的 `10.96.14.7:8080` 吗？**那个"没有任何网卡拥有它"的 ClusterIP 到底是什么东西？**它凭什么能把流量分到两个 Pod 上？
-
-这一章我们会拆开 **Service** 这个 K8s 里最"魔法"的对象：ClusterIP 是怎么虚拟出来的、kube-proxy 在内核里到底写了什么规则、DNS 记录长什么样、为什么 `Service` 明明 ping 不通却能连、以及那个让无数人困惑的 `headless Service`。
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 6 章。*
+1. Deployment 相比 ReplicaSet，多提供了哪两件事？
+2. `spec.selector` 和 `spec.template.metadata.labels` 之间是什么关系？为什么 `selector` 被设计成不可修改？
+3. 滚动更新时，Deployment 控制器**直接**管理的是什么？
+4. ReplicaSet 名字里的那串随机字符是什么？它有什么用？
+5. `replicas=4, maxSurge=1, maxUnavailable=0` 时，滚动过程中总 Pod 数最多几个？可用 Pod 数最少几个？
+6. 为什么 `maxSurge` 和 `maxUnavailable` 不能同时为 0？
+7. 什么场景应该用 `Recreate` 而不是 `RollingUpdate`？
+8. 没有 `readinessProbe` 时，Pod 什么时候会被认为 Ready？会造成什么后果？
+9. 为什么 `kubectl rollout undo` 不需要重新构建镜像？
+10. 回滚不能挽回哪些东西？举两个例子。
+11. `ProgressDeadlineExceeded` 出现后，K8s 会自动回滚吗？会导致服务不可用吗？
+12. `kubectl rollout pause` 在什么场景下有用？

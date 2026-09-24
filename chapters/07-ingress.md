@@ -1,27 +1,20 @@
 # 第 7 章　让世界访问你：Ingress 与南北向流量
 
-> **本章导读**
-> - 建议用时：60 分钟（含 20 分钟动手）
-> - 前置知识：第 6 章（Service、L4 vs L7、Ingress 必须经由 Service）
-> - 读完你应该能回答四个问题：
->   1. `Ingress` 和 `Ingress Controller` 是什么关系？**为什么只建 Ingress 没效果？**
->   2. `pathType` 的三种值有什么区别？`/api` 会不会匹配到 `/apifoo`？
->   3. TLS 在哪里终止？证书存在哪？集群内部之后是明文还是加密？
->   4. **为什么最流行的 Ingress Controller 会在 2026 年 3 月被退役？**Gateway API 又解决了什么？
-
-第 6 章末尾我们画好了这条链路：
+第 6 章末尾给出了这条链路：
 
 ```
 外部用户 → Ingress（七层）→ Service（四层）→ Pod
 ```
 
-这一章把 Ingress 那一层彻底讲透。但在开始之前，我必须先讲一件**正在发生、而且会影响你技术选型**的事。
+本章把 Ingress 这一层讲透：路由规则怎么写、TLS 证书怎么自动签发、控制器之间的注解为什么不通用。
+
+但在进入配置细节之前，有一件正在发生、且直接影响技术选型的事必须先说明。
 
 ---
 
-## 【积木 7-1】先讲一个刚发生的行业事件
+### 7.1 先讲一个刚发生的行业事件
 
-### 2026 年 3 月，Ingress NGINX 退役了
+#### 2026 年 3 月，Ingress NGINX 退役了
 
 如果你搜索"Kubernetes Ingress 教程"，十篇里有九篇会让你装 **ingress-nginx**。它是这个领域事实上的标准，据 Datadog 的调研，**大约 50% 的云原生环境在用它**。
 
@@ -41,13 +34,13 @@
 
 **为什么会走到这一步？**官方给出的原因非常值得一读：
 
-> 这个项目一直只有**一到两个人在业余时间维护**。它当年的"灵活性"（比如允许通过 snippets 注解注入任意 NGINX 配置）如今变成了无法解决的技术债务——那些"方便的功能"后来被认定为严重的安全缺陷。**昨天的灵活性成了今天的负担。**
+这个项目一直只有**一到两个人在业余时间维护**。它当年的"灵活性"（比如允许通过 snippets 注解注入任意 NGINX 配置）如今变成了无法解决的技术债务——那些"方便的功能"后来被认定为严重的安全缺陷。**昨天的灵活性成了今天的负担。**
 
-### 但有一个重要的澄清，很多人搞错了
+#### 但有一个重要的澄清，很多人搞错了
 
 退役的消息传开后，一个常见的误解是：
 
-> "Ingress 要淘汰了，以后不能用 Ingress 了。"
+"Ingress 要淘汰了，以后不能用 Ingress 了。"
 
 **这是错的。**准确的说法是：
 
@@ -64,19 +57,19 @@
 
 这一章会先讲清楚 Ingress 本身（因为它是理解 Gateway API 的必经之路，而且存量系统里到处都是），再讲 Gateway API 解决了什么、怎么选。
 
-> **现在就可以查一下你的集群有没有中招**：
-> ```bash
-> kubectl get pods -A --selector app.kubernetes.io/name=ingress-nginx
-> ```
-> 有输出的话，你就在那受影响的"50%"里，该开始规划迁移了。
+**现在就可以查一下你的集群有没有中招**：
+```bash
+kubectl get pods -A --selector app.kubernetes.io/name=ingress-nginx
+```
+有输出的话，你就在那受影响的"50%"里，该开始规划迁移了。
 
 ---
 
-## 【积木 7-2】Ingress 与 Ingress Controller：声明与实现
+### 7.2 Ingress 与 Ingress Controller：声明与实现
 
 这是本章最核心的一对概念，也是新手最普遍的困惑点。
 
-### 一句话区分
+#### 一句话区分
 
 > **`Ingress` 是一张"路由表"（声明），`Ingress Controller` 是"路由器"（实现）。**
 
@@ -89,7 +82,7 @@
 | 类比 | 写在纸上的交通规则 | 实际在路口指挥的交警 |
 | 查它 | `kubectl get ingress` | `kubectl get pods -n <controller-ns>` |
 
-### 关键结论：没有 Controller，Ingress 就是一纸空文
+#### 关键结论：没有 Controller，Ingress 就是一纸空文
 
 ```bash
 # 没装控制器时
@@ -103,7 +96,7 @@ kubectl get ingress -n cloudnote
 
 这正是第 4 章"控制器模式"的又一次体现：**声明只是数据，必须有控制器去调谐它。**Ingress 是最典型的"对象+控制器"配对——只不过这个控制器不由 K8s 自带，而是**需要你自己部署**。
 
-### 集群里怎么看控制器
+#### 集群里怎么看控制器
 
 ```bash
 # ① 有哪些控制器类（IngressClass）
@@ -120,7 +113,7 @@ kubectl get svc -A | grep -iE "ingress|traefik|envoy|contour"
 
 第 3 条命令会给你一个漂亮的印证：**Ingress Controller 自己就是靠一个 `LoadBalancer` 或 `NodePort` 类型的 Service 暴露给外部的**——所以第 6 章那句"说 Ingress 负责对外是循环的"在这里有了实物证据。
 
-### 控制器生态与维护状态（2026 年 9 月）
+#### 控制器生态与维护状态（2026 年 9 月）
 
 | 控制器 | 类型 | 支持 Gateway API | 维护状态 |
 |---|---|---|---|
@@ -141,7 +134,7 @@ kubectl get svc -A | grep -iE "ingress|traefik|envoy|contour"
 
 ---
 
-## 【积木 7-3】先分清两个词：南北向与东西向
+### 7.3 先分清两个词：南北向与东西向
 
 在讲流量之前，先把这两个术语钉死——读云原生文档时会高频出现。
 
@@ -171,7 +164,7 @@ flowchart TB
 
 ---
 
-## 【积木 7-4】一个 Ingress 的 YAML 逐字段拆解
+### 7.4 一个 Ingress 的 YAML 逐字段拆解
 
 现在看 CloudNote 的真实需求：
 
@@ -189,9 +182,9 @@ metadata:
   name: cloudnote
   namespace: cloudnote
   annotations:
-    # ⚠️ 这里是最容易出问题的地方：不同控制器用的注解完全不同
+    #  这里是最容易出问题的地方：不同控制器用的注解完全不同
     # 下面这行是 Traefik 的写法；换成 Nginx 就是 nginx.ingress.kubernetes.io/...
-    # 这正是 Ingress 可移植性差的根源（积木 7-7 详讲）
+    # 这正是 Ingress 可移植性差的根源（第 7.7 节详讲）
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   # ① 用哪个控制器来实现我
@@ -228,7 +221,7 @@ spec:
                   number: 80
 ```
 
-### 三个字段值得单独讲
+#### 三个字段值得单独讲
 
 **① `spec.rules[].host` 与 `spec.tls[].hosts` 必须一致。**规则里写了 `note.example.com`，TLS 那里也要写，否则证书不会对这条规则生效。
 
@@ -238,11 +231,11 @@ spec:
 
 ---
 
-## 【积木 7-5】`pathType` 的门道：一个真实的坑
+### 7.5 `pathType` 的门道：一个真实的坑
 
 `pathType` 是 Ingress API 里少数几个**必须理解**的字段，因为它的默认行为和你的直觉可能不一样。
 
-### 三种取值
+#### 三种取值
 
 | 值 | 匹配方式 | 例子 |
 |---|---|---|
@@ -250,17 +243,17 @@ spec:
 | **`Prefix`** | **按"路径元素"逐段匹配** | `path: /api` 匹配 `/api`、`/api/`、`/api/v1`、`/api/v1/users` |
 | **`ImplementationSpecific`** | 交给控制器自己决定 | 不推荐用 |
 
-### 关键细节：`Prefix` 是"按路径元素"，不是"按字符串前缀"
+#### 关键细节：`Prefix` 是"按路径元素"，不是"按字符串前缀"
 
 这是最容易搞错的一点。看这个对比：
 
 ```
 path: /api     pathType: Prefix
 
-匹配 /api          ✓
-匹配 /api/v1       ✓
-匹配 /api/v1/users ✓
-匹配 /api/         ✓
+匹配 /api          
+匹配 /api/v1       
+匹配 /api/v1/users 
+匹配 /api/         
 匹配 /apifoo       ✗  ← 注意这里！
 ```
 
@@ -274,7 +267,7 @@ path: /api     pathType: Prefix
 
 **这个设计是刻意的**：如果按字符前缀匹配，`/api` 的规则就会意外吃掉 `/apifoo` 的请求——这是一种很难排查的路由污染。按元素匹配就没这个问题。
 
-### 一个必须遵守的纪律：永远显式写 `pathType`
+#### 一个必须遵守的纪律：永远显式写 `pathType`
 
 老版本的 Ingress 允许不写 `pathType`，但：
 
@@ -283,7 +276,7 @@ path: /api     pathType: Prefix
 
 **所以：每一条 path 都写清楚 `pathType`。**选不准就用 `Prefix`，它是最符合"我要匹配这个目录下所有东西"直觉的那个。
 
-### 顺带说 `path: /` 的特殊性
+#### 顺带说 `path: /` 的特殊性
 
 ```yaml
 - path: /
@@ -296,9 +289,9 @@ path: /api     pathType: Prefix
 
 ---
 
-## 【积木 7-6】TLS 在哪里终止：一次把证书问题讲清
+### 7.6 TLS 在哪里终止：一次把证书问题讲清
 
-### 证书存在哪：Secret
+#### 证书存在哪：Secret
 
 K8s 里有一个专门的 Secret 类型 `kubernetes.io/tls`，它**必须包含两个 key**：
 
@@ -322,7 +315,7 @@ kubectl create secret tls cloudnote-tls -n cloudnote \
   --key=note.example.com.key
 ```
 
-### 终止点在哪：Ingress Controller
+#### 终止点在哪：Ingress Controller
 
 ```mermaid
 flowchart LR
@@ -340,7 +333,7 @@ flowchart LR
 
 **这就是"TLS 终止（TLS Termination）"的含义**：加密连接在入口处"终止"，解密后的请求在集群内部以明文转发。
 
-### 为什么要把证书放在入口，而不是每个 Pod
+#### 为什么要把证书放在入口，而不是每个 Pod
 
 | 方案 | 后果 |
 |---|---|
@@ -349,13 +342,13 @@ flowchart LR
 
 **"应用侧只写 HTTP，加密在边缘做掉"是现代架构的通用做法。**
 
-> **那集群内部要不要也加密？**这取决于你的威胁模型：
-> - 单租户、网络可信（比如云上 VPC 内）→ 内部明文很常见，够用
-> - 多租户、有合规要求、跨可用区传输敏感数据 → 用 **Service Mesh（Istio / Linkerd）做 mTLS**，由 sidecar 自动加密，应用代码依然不用改
->
-> 有些控制器也支持"重新加密到后端"（re-encrypt）：Ingress → 后端的这一段也用 HTTPS。这时后端 Service 需要能接受 HTTPS，配置会复杂一些。
+**那集群内部要不要也加密？**这取决于你的威胁模型：
+- 单租户、网络可信（比如云上 VPC 内）→ 内部明文很常见，够用
+- 多租户、有合规要求、跨可用区传输敏感数据 → 用 **Service Mesh（Istio / Linkerd）做 mTLS**，由 sidecar 自动加密，应用代码依然不用改
 
-### 证书轮转：别手动续期
+有些控制器也支持"重新加密到后端"（re-encrypt）：Ingress → 后端的这一段也用 HTTPS。这时后端 Service 需要能接受 HTTPS，配置会复杂一些。
+
+#### 证书轮转：别手动续期
 
 Let's Encrypt 的证书只有 90 天有效期，手动续期是运维事故的常见来源。标准做法是 **cert-manager**：
 
@@ -380,14 +373,14 @@ cert-manager 看到 Ingress 上有这个注解
 
 ---
 
-## 【积木 7-7】Ingress 的天花板：为什么它会被冻结
+### 7.7 Ingress 的天花板：为什么它会被冻结
 
 现在回答导读里的第四个问题。理解了 Ingress 的**结构性缺陷**，你就能同时理解两件看似无关的事：
 
 1. 为什么**最流行的控制器会无人维护到退役**
 2. 为什么**官方要另起炉灶做 Gateway API**
 
-### 缺陷一：功能太弱，只能说"谁去哪"
+#### 缺陷一：功能太弱，只能说"谁去哪"
 
 Ingress 能表达的规则几乎是"最小公约数"：
 
@@ -404,7 +397,7 @@ Ingress 能表达的规则几乎是"最小公约数"：
 
 **而"灰度发布"是生产的刚需。**Ingress API 表达不了，于是所有人都去用各家控制器的**私有注解**。
 
-### 缺陷二：靠 annotation 扩展 → 彻底失去可移植性
+#### 缺陷二：靠 annotation 扩展 → 彻底失去可移植性
 
 这是最致命的问题。因为在标准 API 里表达不了，所有控制器都用注解（annotation）来扩展：
 
@@ -428,15 +421,15 @@ metadata:
 
 > **注解失效最危险的地方在于"它不报错"。**你把 Ingress 从 Nginx 迁到 Traefik，`kubectl apply` 成功、路由看起来正常，但"限流""灰度权重""请求体大小限制"这些注解全部被忽略——**直到出事故你才发现策略没了。**
 
-### 缺陷三：多租户隔离很弱
+#### 缺陷三：多租户隔离很弱
 
 Ingress 是**命名空间级别**的对象，但它引用的域名、TLS 证书是**集群级别**的资源。所以在共享集群里，A 团队的 Ingress 可以声明 `host: b-team.example.com`，把 B 团队的域名抢走——**没有任何机制阻止它**。
 
-### 缺陷四：不支持四层
+#### 缺陷四：不支持四层
 
 Ingress **只管 HTTP/HTTPS**。要让 TCP/UDP 流量（数据库端口、MQTT 等）进来，得靠控制器私有的 ConfigMap 或 CRD——**又是一次不可移植**。
 
-### 于是，官方的选择是"冻结并重做"
+#### 于是，官方的选择是"冻结并重做"
 
 Ingress API 进入 **feature freeze**（不再加新特性），官方把精力投向 **Gateway API**。
 
@@ -446,9 +439,9 @@ Ingress API 进入 **feature freeze**（不再加新特性），官方把精力�
 
 ---
 
-## 【积木 7-8】Gateway API：角色分离与更强表达力
+### 7.8 Gateway API：角色分离与更强表达力
 
-### 三个对象，对应三种角色
+#### 三个对象，对应三种角色
 
 Gateway API 最重要的设计思想是**按角色拆分对象**：
 
@@ -463,7 +456,7 @@ flowchart TB
 
 | 对象 | 谁管 | 类比 |
 |---|---|---|
-| **GatewayClass** | 基础设施提供方（云厂商 / 平台团队） | "我们用的是哪个牌子的大门" |
+| **GatewayClass** | 基础设施提供方（云厂商 / 平台团队） | "用的是哪个牌子的大门" |
 | **Gateway** | 集群运维 | "这个大门开在哪、开几个口、挂什么证书" |
 | **HTTPRoute / GRPCRoute / TLSRoute / TCPRoute…** | **应用开发者** | "哪个路径进哪个门" |
 
@@ -475,7 +468,7 @@ flowchart TB
 | 灰度/头匹配表达不了 | **原生支持** `weight`（权重）、`headers`、`method`、`queryParams` |
 | 扩展靠不可移植的注解 | 在 CRD 里表达，**各家实现遵循同一套规范** |
 
-### 对比：同一个"金丝雀发布"需求
+#### 对比：同一个"金丝雀发布"需求
 
 **Ingress 的写法（靠私有注解，换控制器就失效）**：
 
@@ -508,7 +501,7 @@ spec:
 
 **`weight` 是规范里的字段，不是某个控制器的私有发明。**这就是根本差别。
 
-### 现状与选型建议（2026 年 9 月）
+#### 现状与选型建议（2026 年 9 月）
 
 | 维度 | 现状 |
 |---|---|
@@ -523,17 +516,17 @@ spec:
 2. **存量 ingress-nginx**：抓紧迁移。如果工程量允许，**直接迁 Gateway API**，别先平移到另一个 Ingress 控制器再迁第二次
 3. **迁移工具**：用 `ingress2gateway` 生成骨架，但**注解必须手工逐条翻译**（工具不会帮你猜各家注解的语义）
 
-> **一个特别容易忽略的迁移清单项**：迁移前先把自己集群里所有 `nginx.ingress.kubernetes.io/*` 注解**列出来**，逐条确认它在目标实现里对应什么。因为注解失效是**静默**的——路由还能通，但策略（限流、超时、请求体大小、灰度）悄无声息地没了。
->
-> ```bash
-> kubectl get ingress -A -o json \
->   | jq -r '.items[].metadata.annotations | keys[]' \
->   | grep -E "^nginx\.ingress" | sort | uniq -c | sort -rn
-> ```
+**一个特别容易忽略的迁移清单项**：迁移前先把自己集群里所有 `nginx.ingress.kubernetes.io/*` 注解**列出来**，逐条确认它在目标实现里对应什么。因为注解失效是**静默**的——路由还能通，但策略（限流、超时、请求体大小、灰度）悄无声息地没了。
+
+```bash
+kubectl get ingress -A -o json \
+  | jq -r '.items[].metadata.annotations | keys[]' \
+  | grep -E "^nginx\.ingress" | sort | uniq -c | sort -rn
+```
 
 ---
 
-## 【积木 7-9】动手：搭一个七层入口
+### 7.9 动手：搭一个七层入口
 
 配套脚本：
 
@@ -541,7 +534,7 @@ spec:
 bash cases/cloudnote/tools/ingress-lab.sh
 ```
 
-### 第一步：先确认集群里有没有控制器
+#### 第一步：先确认集群里有没有控制器
 
 ```bash
 kubectl get ingressclass
@@ -561,9 +554,9 @@ helm install traefik traefik/traefik \
   --set providers.kubernetesGateway.enabled=true
 ```
 
-> **注意**：`--set ingressClass.isDefaultClass=true` 让 Traefik 成为默认控制器，这样 Ingress YAML 里不写 `ingressClassName` 也能工作（方便学习）。生产上建议**显式写类名**，避免依赖"默认"这种隐式约定。
+**注意**：`--set ingressClass.isDefaultClass=true` 让 Traefik 成为默认控制器，这样 Ingress YAML 里不写 `ingressClassName` 也能工作（方便学习）。生产上建议**显式写类名**，避免依赖"默认"这种隐式约定。
 
-### 第二步：部署两个应用（web 和 api）
+#### 第二步：部署两个应用（web 和 api）
 
 路径分流需要两个 Service 才看得出效果：
 
@@ -576,7 +569,7 @@ kubectl apply -f cases/cloudnote/30-web.yaml
 kubectl get pods,svc -n cloudnote
 ```
 
-### 第三步：创建 Ingress
+#### 第三步：创建 Ingress
 
 ```bash
 kubectl apply -f cases/cloudnote/40-ingress.yaml
@@ -595,7 +588,7 @@ kubectl describe ingress cloudnote -n cloudnote
 
 `Events` 里通常会写明"Ingress 已被某某控制器接管"。
 
-### 第四步：测试路径分流
+#### 第四步：测试路径分流
 
 因为本地 kind 集群不一定把 80 端口映射出来，**最通用的测试方式是用 port-forward**：
 
@@ -628,7 +621,7 @@ kubectl logs -n cloudnote -l app=api --tail=5
 
 **只有 api 的日志里出现了 `/api` 的请求记录，web 的日志里出现的是 `/`** —— 分流成功。
 
-### 第五步：验证 `Prefix` 的匹配边界
+#### 第五步：验证 `Prefix` 的匹配边界
 
 ```bash
 # 这些都应该到 api（第一段是 api）
@@ -642,7 +635,7 @@ curl -s -o /dev/null -w "/apifoo   → %{http_code}\n" -H "Host: note.example.co
 
 **最后一条最能说明 `Prefix` 的语义**：`/apifoo` 不会被 `/api` 的规则吃掉。去对比两边日志确认。
 
-### 第六步：配上 TLS
+#### 第六步：配上 TLS
 
 ```bash
 # ① 生成一张自签证书（学习中用；生产用 cert-manager 自动申请）
@@ -685,16 +678,14 @@ curl -skv --resolve note.example.com:8443:127.0.0.1 \
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 7.10 本章要点
 
 1. **`Ingress` 是声明（路由表），`Ingress Controller` 是实现（路由器）。**只创建 Ingress 对象没有任何效果——必须有控制器去 watch 它并生成代理配置。这是"控制器模式"的又一实例。
 2. **真正的分界线是 L4 vs L7**（第 6 章已建立）：Service 看 IP:端口，Ingress 看域名/路径/Header，但 **Ingress 必须经由 Service 才能到达 Pod**。
 3. **TLS 在 Ingress Controller 处终止**，证书存在 `kubernetes.io/tls` 类型的 Secret 里。**应用侧只写 HTTP**，运维复杂度和证书轮转风险都下降一个数量级。
 4. **Ingress 的下一代是 Gateway API**，而 **2026 年 3 月 ingress-nginx 的退役**是"API 表达能力不足 → 逼所有人用私有扩展 → 技术债与安全问题累积"这条链的必然结局。
 
-### 一张图收尾
+#### 本章全景图
 
 ```
    用户 https://note.example.com/api/notes
@@ -716,34 +707,18 @@ curl -skv --resolve note.example.com:8443:127.0.0.1 \
                     Pod × N（只处理 HTTP）
 ```
 
-### 自测题
+### 7.11 练习题
 
-1. `Ingress` 和 `Ingress Controller` 分别是什么？为什么只创建 Ingress 对象没有效果？（积木 7-2）
-2. 怎么快速检查你的集群是否在用已退役的 ingress-nginx？（积木 7-1）
-3. ingress-nginx 退役**不**代表 Ingress API 被淘汰，为什么？两者状态分别是什么？（积木 7-1）
-4. 南北向和东西向流量分别指什么？为什么说这不是"对象的职责边界"？（积木 7-3）
-5. `path: /api` + `pathType: Prefix` 会匹配 `/apifoo` 吗？为什么？（积木 7-5）
-6. `Exact` 和 `Prefix` 的区别是什么？`path: /` 配 `Prefix` 会匹配什么？（积木 7-5）
-7. TLS 在哪里终止？终止之后集群内部是明文还是加密？想内部也加密该用什么？（积木 7-6）
-8. `kubernetes.io/tls` 类型的 Secret 必须包含哪两个 key？证书轮转该用什么工具？（积木 7-6）
-9. 为什么说"每个 Pod 装证书"是坏做法？列出至少两个理由。（积木 7-6）
-10. Ingress API 表达不了哪三类常见需求？由此导致了什么问题？（积木 7-7）
-11. 为什么注解失效比"配置报错"更危险？（积木 7-7）
-12. Gateway API 的三个角色和三个对象分别是什么？它怎么解决 Ingress 的多租户问题？（积木 7-8）
-13. 用 Gateway API 表达"10% 流量给灰度版本"，和用 Ingress 注解表达，本质差别在哪？（积木 7-8）
-
-### 下一章预告
-
-**第 8 章：配置与密钥 —— ConfigMap 与 Secret**
-
-CloudNote 现在能把流量接进来了。但还有一个问题一直悬着：
-
-> **数据库密码在哪？**第 5 章的 Deployment YAML 里，`image` 是写死的，这没问题；但 `db.host`、`db.password` 这些呢？如果写进 YAML，那**配置就和镜像绑死在一起**了——改一次密码就要重新构建镜像、重新发布。
->
-> 而且这个 YAML 还要提交到 Git——**密码就进了代码仓库**。
-
-这一章我们会讲：ConfigMap 和 Secret 到底有什么本质区别（**提示：不是"加密与否"**）、环境变量注入 vs 文件挂载各自什么时候用、**为什么改 ConfigMap 后 Pod 不会自动重启**（这是个经典陷阱）、以及 Secret 到底安不安全、`stringData` 和 `data` 有什么不同。
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 8 章。*
+1. `Ingress` 和 `Ingress Controller` 分别是什么？为什么只创建 Ingress 对象没有效果？
+2. 怎么快速检查你的集群是否在用已退役的 ingress-nginx？
+3. ingress-nginx 退役**不**代表 Ingress API 被淘汰，为什么？两者状态分别是什么？
+4. 南北向和东西向流量分别指什么？为什么说这不是"对象的职责边界"？
+5. `path: /api` + `pathType: Prefix` 会匹配 `/apifoo` 吗？为什么？
+6. `Exact` 和 `Prefix` 的区别是什么？`path: /` 配 `Prefix` 会匹配什么？
+7. TLS 在哪里终止？终止之后集群内部是明文还是加密？想内部也加密该用什么？
+8. `kubernetes.io/tls` 类型的 Secret 必须包含哪两个 key？证书轮转该用什么工具？
+9. 为什么说"每个 Pod 装证书"是坏做法？列出至少两个理由。
+10. Ingress API 表达不了哪三类常见需求？由此导致了什么问题？
+11. 为什么注解失效比"配置报错"更危险？
+12. Gateway API 的三个角色和三个对象分别是什么？它怎么解决 Ingress 的多租户问题？
+13. 用 Gateway API 表达"10% 流量给灰度版本"，和用 Ingress 注解表达，本质差别在哪？
