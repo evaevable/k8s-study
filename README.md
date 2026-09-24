@@ -36,7 +36,7 @@
 | 09 | [数据要持久：Volume、PV、PVC、StorageClass](chapters/09-storage.md) | 容器死了数据为什么还在？RWO 到底是什么？ | 已发布 |
 | 10 | [调度与资源管理：requests、limits、QoS 与亲和性](chapters/10-scheduling.md) | 为什么 CPU 只是变慢而内存会被杀？ | 已发布 |
 | 11 | [自愈的真相：探针与故障恢复](chapters/11-self-healing.md) | K8s 到底能修哪些故障？liveness 为什么危险？ | 已发布 |
-| 12 | 弹性伸缩：HPA / VPA / Cluster Autoscaler | 怎么自动从 2 个副本扩到 20 个？ | 待发布 |
+| 12 | [弹性伸缩：HPA、VPA 与 Cluster Autoscaler](chapters/12-autoscaling.md) | 为什么 requests 写错 HPA 就失灵？ | 已发布 |
 | 13 | 工作负载全景：StatefulSet / DaemonSet / Job | 有状态服务、每节点一个、批处理任务怎么办？ | 待发布 |
 | 14 | 实战总演习：CloudNote 从 0 到 1 | 部署、扩缩容、故障恢复全流程实操 | 待发布 |
 | 15 | 生产实践与排错手册 | 上线前检查清单、故障树、常用命令 | 待发布 |
@@ -60,7 +60,8 @@ k8s-study/
 │   ├── 08-configmap-secret.md
 │   ├── 09-storage.md
 │   ├── 10-scheduling.md
-│   └── 11-self-healing.md
+│   ├── 11-self-healing.md
+│   └── 12-autoscaling.md
 ├── cases/cloudnote/              # 贯穿案例的 YAML 清单，随章节逐步填充
 │   ├── 00-namespace.yaml
 │   ├── 10-config.yaml
@@ -70,8 +71,10 @@ k8s-study/
 │   ├── 22-api-service.yaml
 │   ├── 28-scheduling-demo.yaml
 │   ├── 30-web.yaml
+│   ├── 35-worker.yaml
 │   ├── 40-ingress.yaml
 │   ├── 45-pvc-demo.yaml
+│   ├── 60-hpa.yaml
 │   ├── 70-probes-demo.yaml
 │   ├── tools/inspect-cluster.sh
 │   ├── tools/reconcile-lab.sh
@@ -82,6 +85,7 @@ k8s-study/
 │   ├── tools/storage-lab.sh
 │   ├── tools/scheduling-lab.sh
 │   ├── tools/probes-lab.sh
+│   ├── tools/autoscaling-lab.sh
 │   └── README.md
 └── .gitignore
 ```

@@ -1,0 +1,90 @@
+# ============================================================================
+# CloudNote 的 worker —— 异步任务处理（第 12 章）
+#
+# 用途：为第 12 章的「按队列长度扩缩」提供 HPA 的目标对象。
+#
+# worker 的特征（这正是它不能按 CPU 扩缩的原因）：
+#   从队列取任务 → 调外部服务生成 PDF（等 3 秒，CPU 几乎为 0）
+#   → 存文件（IO，CPU 几乎为 0）→ 取下一个
+#   典型的 IO 密集 + 等待型服务，CPU 利用率永远很低。
+#
+#   按 CPU 扩缩（目标 50%）：5/50 = 0.1 < 1 → 永远不扩
+#   结果：队列积压 10000 个任务，HPA 却认为「很闲」
+#
+# 说明：这里用 busybox 模拟一个「消费队列」的 worker（循环 sleep 模拟等 IO）。
+#       真实场景中它会连 MQ / Redis 队列。
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 35-worker.yaml
+#   kubectl apply -f 60-hpa.yaml
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: cloudnote
+  labels:
+    app: worker
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/part-of: cloudnote
+  annotations:
+    kubernetes.io/change-cause: "初始发布 v1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  # 异步消费型任务：可以接受稍长的替换窗口，但要避免同时没有消费者
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      # 消费型任务通常要打散，避免一句话的任务全落到同一节点
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: worker
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "[worker] 开始消费 pdf-export 队列"
+              while true; do
+                # 模拟：从队列取一个任务 → 等外部服务（3 秒）→ 存文件
+                echo "[$(date +%T)] 处理一个导出任务（等待外部服务……）"
+                sleep 3
+              done
+          env:
+            - name: VERSION
+              value: "v1"
+            - name: QUEUE_NAME
+              value: pdf-export
+          # ⚠️ requests 必须有，否则 HPA 无法计算（即使是自定义指标，
+          #    某些指标路径也需要 requests 参与计算）
+          # 注意：这里的 requests 故意写得很小 —— worker 等 IO 时 CPU 用量本来就低。
+          #       也正因如此，按 CPU 扩缩对它没有意义（见文件头注释）。
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # worker 没有对外端口，所以不需要 readinessProbe 的 HTTP 检查。
+          # 但真实场景建议加一个「能不能连上队列」的 readiness 检查（第 11 章）。
+          # readinessProbe:
+          #   exec:
+          #     command: ["sh", "-c", "test -f /tmp/queue-connected"]

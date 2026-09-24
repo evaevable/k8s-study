@@ -1,0 +1,166 @@
+# ============================================================================
+# CloudNote 的弹性伸缩 —— HPA + VPA（第 12 章）
+#
+# 包含三个对象：
+#   ① HorizontalPodAutoscaler/api    按 CPU 扩缩（资源型指标）
+#   ② HorizontalPodAutoscaler/worker 按队列积压量扩缩（需要自定义指标 adapter，
+#                                    没有 adapter 时它会报 <unknown>，这是预期行为，
+#                                    正好用来说明「指标选错会怎样」）
+#   ③ VerticalPodAutoscaler/api-vpa  updateMode: Off —— 只给建议，不动手
+#
+# 前置条件（缺一个 HPA 就不会工作）：
+#   ① 装了 metrics-server
+#   ② 目标容器的每个 containers 都写了 resources.requests（HPA 的分母）
+#   ③ 目标是 Deployment / RS / StatefulSet 这类有 scale 子资源的对象
+#
+# 使用：
+#   kubectl apply -f 00-namespace.yaml
+#   kubectl apply -f 20-api-deployment.yaml
+#   kubectl apply -f 60-hpa.yaml
+#   kubectl get hpa,vpa -n cloudnote
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# ① api：按 CPU 利用率扩缩
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  # minReplicas 不要设 1：留一点 baseline，扛住突发的头几十秒
+  # 从 1 扩到 10 至少要几分钟（HPA 决策 + 启动 + 就绪探针）
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # ⚠️ 关键理解：这个 50% 是「占 requests 的百分比」，不是占 limits、也不是占节点 CPU
+          #    CPU 利用率 = 实际用量 / requests
+          #    所以 requests 写错 = HPA 完全失灵（写小了会一直扩到上限，写大了永远不扩）
+          type: Utilization
+          averageUtilization: 50
+
+  # 扩缩容的节奏控制。核心思想：两个方向的风险不对称，策略也不该对称。
+  behavior:
+    # 扩容：立即执行（宁可多给资源，不能让用户等待）
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100          # 每 15 秒最多翻一倍
+          periodSeconds: 15
+        - type: Pods
+          value: 4            # 或者每 15 秒最多加 4 个（两者取较大值）
+          periodSeconds: 15
+      selectPolicy: Max
+      # 为什么要限速：无限制扩容会瞬间打爆下游（比如数据库连接被打满）
+      # 限速保护的是下游，不是自己
+
+    # 缩容：先观察 5 分钟（万一流量马上回来，缩了就很惨）
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10           # 每 60 秒最多缩 10%
+          periodSeconds: 60
+      selectPolicy: Max
+---
+# ---------------------------------------------------------------------------
+# ② worker：按「队列积压量」扩缩
+#
+# 为什么 worker 不能用 CPU：
+#   worker 的模式是「取任务 → 等外部服务生成 PDF（3 秒）→ 存文件 → 取下一个」
+#   典型的 IO 密集 + 等待型，CPU 利用率永远很低（5% 左右）
+#   按 CPU 扩缩（目标 50%）：5/50 = 0.1 < 1 → 永远不扩
+#   结果：队列积压 10000 个任务，HPA 却认为「很闲，甚至想缩容」
+#
+# 正确的指标是「反映系统压力的那个量」—— 队列里待处理的消息数。
+#
+# 注意：这个 HPA 需要集群里装了能提供 external 指标的 adapter
+#      （如 prometheus-adapter 配合 RabbitMQ exporter）。
+#      没装 adapter 时，它的 TARGETS 会显示 <unknown>，这是预期行为 ——
+#      正好用来演示「指标源缺了会怎样」。
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker
+  namespace: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: rabbitmq_queue_messages_ready
+          selector:
+            matchLabels:
+              queue: pdf-export
+        target:
+          type: AverageValue
+          averageValue: "30"     # 每个 worker 平均消化 30 个积压任务
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 5
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600     # 队列消费型，缩容要更保守
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+---
+# ---------------------------------------------------------------------------
+# ③ api 的 VPA：updateMode: Off —— 只给建议，不动手
+#
+# 为什么不直接开 Recreate：
+#   ① Recreate 会「驱逐并重建 Pod」来调整资源。在流量高峰期被 VPA 驱逐重建，
+#      后果可能比资源不准更严重。
+#   ② VPA 改 requests 会改变 HPA 的分母，两个控制器互相影响对方的输入 ——
+#      官方对「HPA + VPA 同时作用于同一指标」的立场是「谨慎」。
+#
+# 所以最实用的用法是：Off 模式当「资源顾问」。
+#   kubectl describe vpa api-vpa -n cloudnote | sed -n '/Recommendation/,$p'
+#   读出 Target / Lower Bound / Upper Bound，把 Target 写回 Deployment 的 requests。
+#   —— 而这份「校准过的 requests」恰好就是 HPA 能否算对的前提（积木 12-2）。
+#
+# 注意：VPA 需要集群里装了 VPA 的组件（推荐器 + 准入控制器），否则对象会被接受
+#      但 status.recommendation 一直是空的。
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: api-vpa
+  namespace: cloudnote
+  labels:
+    app.kubernetes.io/part-of: cloudnote
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  updatePolicy:
+    updateMode: "Off"        # Off 只给建议 | Initial 只在新 Pod 生效 | Recreate 会重建 Pod
