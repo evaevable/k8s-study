@@ -1,15 +1,6 @@
 # 第 13 章　工作负载全景：StatefulSet、DaemonSet、Job 与 CronJob
 
-> **本章导读**
-> - 建议用时：65 分钟（含 25 分钟动手）
-> - 前置知识：第 2 章（Pod 是一次性的）、第 4 章（ownerReference / 声明式的边界）、第 6 章（headless Service）、第 9 章（PV / PVC，以及"用 Deployment 管数据库会抢同一个 PVC"的伏笔）、第 12 章（worker）
-> - 读完你应该能回答四个问题：
->   1. **K8s 的五种工作负载分别回答什么问题？怎么选？**
->   2. `StatefulSet` 提供的**三个"稳定"**是什么？它**不**解决什么？
->   3. `DaemonSet` 和"Deployment + N 个副本"有什么本质区别？
->   4. **第 4 章那个问题终于有答案了**：怎么把"一次性动作"塞进声明式框架？
-
-前 12 章我们几乎只用了一个工作负载：**Deployment**。`api`、`web`、`worker` 都是它管的，也确实够用——因为它们都是**无状态**的。
+前 12 章几乎只用到一个工作负载：**Deployment**。`api`、`web`、`worker` 都由它管理，这也够用，因为它们都是**无状态**的。
 
 但 CloudNote 里还有三个需求，`Deployment` 全都解决不了：
 
@@ -19,11 +10,11 @@
 | **每个节点上都要跑的日志采集器** | Deployment 管的是"**总数**"，它不知道"每个节点一个"是什么概念 |
 | **一次性的数据迁移任务** | Job 要的是"**跑完就结束**"，而 Deployment 会**一直重启**它 |
 
-**这一章就是把剩下四个工作负载补齐，并给出选择它们的判断准则。**
+本章补齐剩下的四个工作负载——StatefulSet、DaemonSet、Job 与 CronJob——并给出在它们之间做选择的判断准则。需要预先说明的是，StatefulSet 让"每个副本有自己的身份和存储"成为可能，但它并不理解数据库，更不负责主从切换；这条边界在 13.4 节会单独展开。
 
 ---
 
-## 【积木 13-1】五种工作负载的总纲
+### 13.1 五种工作负载的总纲
 
 ```mermaid
 flowchart TB
@@ -51,18 +42,18 @@ flowchart TB
 1. **这个进程要一直跑，还是跑完就结束？** → 决定是 Deployment/StatefulSet/DaemonSet 这一族，还是 Job/CronJob 这一族
 2. **每个副本是完全对等的，还是需要自己的身份和存储？** → 决定是 Deployment 还是 StatefulSet
 
-> **第三块判断**（补充）：**是"每个节点一个"吗？** → DaemonSet。这一条容易被忽略，因为它不由应用需求驱动，而由**基础设施需求**驱动（日志、监控、网络插件）。
+**第三块判断**（补充）：**是"每个节点一个"吗？** → DaemonSet。这一条容易被忽略，因为它不由应用需求驱动，而由**基础设施需求**驱动（日志、监控、网络插件）。
 
 ---
 
-## 【积木 13-2】StatefulSet 的三个"稳定"
+### 13.2 StatefulSet 的三个"稳定"
 
 先把第 9 章那个伏笔收掉。
 
 **用 Deployment 管 postgres 会发生什么？**
 
 ```yaml
-# ❌ 用 Deployment 管数据库
+#  用 Deployment 管数据库
 spec:
   replicas: 3
   template:
@@ -91,7 +82,7 @@ flowchart TB
     S3 --> R
 ```
 
-### ① 稳定网络身份
+#### ① 稳定网络身份
 
 | | Deployment | StatefulSet |
 |---|---|---|
@@ -122,9 +113,9 @@ spec:
 | `postgres-1.postgres` | **那一个** Pod 的 IP | **精确寻址**（"我要连 1 号节点"） |
 | `postgres`（headless） | **所有** Pod 的 IP 列表 | 客户端自己选（第 6 章讲过） |
 
-> **这就是第 6 章那个 Headless Service 存在的理由。**当时说的是"用于 StatefulSet"，现在你看到实物了：**没有它，Pod 就没有自己的稳定域名，主从配置就写不出来。**
+**这就是第 6 章那个 Headless Service 存在的理由。**当时说的是"用于 StatefulSet"，现在你看到实物了：**没有它，Pod 就没有自己的稳定域名，主从配置就写不出来。**
 
-### ② 稳定存储：`volumeClaimTemplates`
+#### ② 稳定存储：`volumeClaimTemplates`
 
 这是 StatefulSet 最优雅的设计——**它把"PVC 模板"写进 StatefulSet，由它给每个 Pod 自动创建一个独立的 PVC**：
 
@@ -149,7 +140,7 @@ data-postgres-2
 
 **关键特性（这是 StatefulSet 存储和 Deployment 最本质的差别）**：
 
-> **每个 Pod 被重建时，会挂回它原来那个 PVC。**
+**每个 Pod 被重建时，会挂回它原来那个 PVC。**
 
 ```
 postgres-1 挂了
@@ -163,17 +154,17 @@ StatefulSet 控制器重建它，名字仍然是 postgres-1
 
 **这是 Deployment 做不到的**：Deployment 的 Pod 重建后是"随便一个新 Pod"，它不知道"我原来用哪块盘"。
 
-> **⚠️ 一个必须记住的行为**：**删除 StatefulSet 默认不会删除它创建的 PVC。**
->
-> ```bash
-> kubectl delete statefulset postgres -n cloudnote
-> kubectl get pvc -n cloudnote
-> # data-postgres-0 / -1 / -2  【还在】
-> ```
->
-> **这是刻意的保护**（防止手一抖删了 StatefulSet 顺便把数据库数据删了），但也意味着：**你以为删干净了，其实数据盘还占着、还在计费。**要清理必须手动删 PVC。
+** 一个必须记住的行为**：**删除 StatefulSet 默认不会删除它创建的 PVC。**
 
-### ③ 有序启停
+```bash
+kubectl delete statefulset postgres -n cloudnote
+kubectl get pvc -n cloudnote
+# data-postgres-0 / -1 / -2  【还在】
+```
+
+**这是刻意的保护**（防止手一抖删了 StatefulSet 顺便把数据库数据删了），但也意味着：**你以为删干净了，其实数据盘还占着、还在计费。**要清理必须手动删 PVC。
+
+#### ③ 有序启停
 
 默认 `podManagementPolicy: OrderedReady`，行为是：
 
@@ -204,11 +195,11 @@ spec:
   podManagementPolicy: Parallel    # 所有 Pod 同时创建，不等前一个就绪
 ```
 
-> **注意**：`Parallel` 只影响**创建/删除的顺序**，**不影响身份的稳定性**——Pod 仍然叫 `-0/-1/-2`、仍然各有自己的 PVC。**这两个保证是独立的。**
+**注意**：`Parallel` 只影响**创建/删除的顺序**，**不影响身份的稳定性**——Pod 仍然叫 `-0/-1/-2`、仍然各有自己的 PVC。**这两个保证是独立的。**
 
 ---
 
-## 【积木 13-3】一个完整的 StatefulSet：CloudNote 的 postgres
+### 13.3 一个完整的 StatefulSet：CloudNote 的 postgres
 
 文件位置：`cases/cloudnote/50-postgres.yaml`
 
@@ -279,7 +270,7 @@ spec:
             storage: 10Gi
 ```
 
-### 逐块拆解
+#### 逐块拆解
 
 | 片段 | 作用 | 漏了会怎样 |
 |---|---|---|
@@ -291,7 +282,7 @@ spec:
 | `readinessProbe: pg_isready` | **有序启动的判据**——前一个就绪才起下一个 | 有序启动退化成"起了就算"，主从可能错乱 |
 | `terminationGracePeriodSeconds`（默认 30s） | 缩容时给数据库时间落盘 | 数据可能损坏 |
 
-### 观察它的行为
+#### 观察它的行为
 
 ```bash
 kubectl apply -f cases/cloudnote/50-postgres.yaml
@@ -323,7 +314,7 @@ kubectl get pods -n cloudnote -l app=postgres
 
 ---
 
-## 【积木 13-4】StatefulSet 的边界：它只给了地基，没给房子
+### 13.4 StatefulSet 的边界：它只给了地基，没给房子
 
 **这一节必须讲清楚，否则你会对 StatefulSet 产生过高的期待。**
 
@@ -331,19 +322,19 @@ StatefulSet 提供的**只有**三块地基：
 
 | 它给了什么 | 它**没有**给什么 |
 |---|---|
-| 稳定网络身份（`-0/-1/-2` + DNS） | ❌ **不管数据复制**（主从同步要应用自己或 Operator 做） |
-| 稳定存储（每个 Pod 自己的 PVC） | ❌ **不管选主 / 故障转移**（谁是新主库？它不知道） |
-| 有序启停 | ❌ **不管备份**（第 9 章那条红线） |
-| — | ❌ **不管版本升级**（数据库大版本升级怎么滚动？） |
-| — | ❌ **不管扩缩容的数据再平衡**（加一个分片，数据怎么迁？） |
+| 稳定网络身份（`-0/-1/-2` + DNS） |  **不管数据复制**（主从同步要应用自己或 Operator 做） |
+| 稳定存储（每个 Pod 自己的 PVC） |  **不管选主 / 故障转移**（谁是新主库？它不知道） |
+| 有序启停 |  **不管备份**（第 9 章那条红线） |
+| — |  **不管版本升级**（数据库大版本升级怎么滚动？） |
+| — |  **不管扩缩容的数据再平衡**（加一个分片，数据怎么迁？） |
 
 **换句话说**：
 
-> **StatefulSet 让"每个副本有自己的身份和存储"这件事成为可能，但它完全不知道 PostgreSQL 是什么、更不知道主从该怎么配。**
->
-> **它提供的是**编排原语**，不是**数据库运维能力**。
+**StatefulSet 让"每个副本有自己的身份和存储"这件事成为可能，但它完全不知道 PostgreSQL 是什么、更不知道主从该怎么配。**
 
-### 那生产上该怎么办：Operator
+**它提供的是**编排原语**，不是**数据库运维能力**。
+
+#### 那生产上该怎么办：Operator
 
 **这正是第 4 章那个"CRD + 控制器 = Operator"的用武之地。**
 
@@ -385,7 +376,7 @@ spec:
 | 版本升级（含数据目录升级） | **你查文档 + 手工操作** | 自动 |
 | 扩容后数据再平衡 | **基本做不到** | 视 Operator 而定 |
 
-### 三条务实建议
+#### 三条务实建议
 
 | 优先级 | 做法 | 理由 |
 |---|---|---|
@@ -397,9 +388,9 @@ spec:
 
 ---
 
-## 【积木 13-5】DaemonSet：每个节点跑一个
+### 13.5 DaemonSet：每个节点跑一个
 
-### 它解决什么问题
+#### 它解决什么问题
 
 有一类程序的需求不是"跑 N 个副本"，而是"**每个节点上都要有一个**"：
 
@@ -414,7 +405,7 @@ spec:
 
 **它们有个共同点**：**必须在本地，跨节点就没意义了。**
 
-### 为什么不能用 Deployment + 固定副本数代替
+#### 为什么不能用 Deployment + 固定副本数代替
 
 因为**节点数是会变的**：
 
@@ -432,7 +423,7 @@ Deployment replicas: 5
 
 **"N 个副本"和"每节点一个"是完全不同的两种需求**——这就是为什么需要另一个工作负载类型。
 
-### 关键特性
+#### 关键特性
 
 ```yaml
 apiVersion: apps/v1
@@ -495,21 +486,21 @@ spec:
 | **② 常用 `hostPath`** | 因为它要读宿主机的文件。**注意：`hostPath` 是第 9 章说的反模式，但这里恰恰是正当用法**——因为"每个节点处理自己的东西"正是它的设计目的 |
 | **③ 资源要卡死** | agent 跑在每个节点上，**资源 request 乘以节点数**。一个 request 200m 的 agent 在 100 个节点上就是 20 核 |
 
-> **`DaemonSet` 通常还需要 `hostNetwork: true`**（比如 CNI 插件、kube-proxy），让它直接用宿主机的网络栈。
->
-> **回顾第 3 章**：我们当时看到"kube-proxy 和 CNI 插件以 DaemonSet 形式跑在每个节点上"——现在你知道为什么了。
+**`DaemonSet` 通常还需要 `hostNetwork: true`**（比如 CNI 插件、kube-proxy），让它直接用宿主机的网络栈。
+
+**回顾第 3 章**：那里提到过"kube-proxy 和 CNI 插件以 DaemonSet 形式跑在每个节点上"，原因到这里就清楚了。
 
 ---
 
-## 【积木 13-6】Job：第 4 章那个问题，终于有答案了
+### 13.6 Job：第 4 章那个问题，终于有答案了
 
-### 先回顾那个问题
+#### 先回顾那个问题
 
-第 4 章【积木 4-9】里，我们问过：
+第 4.9 节提过一个问题：
 
-> **"给用户发一封通知邮件"这种一次性动作，怎么用声明式表达？**
->
-> 因为"邮件已发出"这个状态没法持续维持——你无法让系统"保持邮件已发出"，再调谐一次就会再发一次。
+**"给用户发一封通知邮件"这种一次性动作，怎么用声明式表达？**
+
+因为"邮件已发出"这个状态没法持续维持——你无法让系统"保持邮件已发出"，再调谐一次就会再发一次。
 
 当时给了一句提示：
 
@@ -517,7 +508,7 @@ spec:
 
 **现在把这件事讲清楚。**
 
-### Job 的模型：把"动作"转成"计数器"
+#### Job 的模型：把"动作"转成"计数器"
 
 **Job 的"期望状态"不是"执行某个动作"，而是**：
 
@@ -527,7 +518,7 @@ status.succeeded == spec.completions
 
 也就是说：
 
-> **"我要有 1 个 Pod 成功退出。"**
+**"我要有 1 个 Pod 成功退出。"**
 
 **这个状态是"可以持续维持"的**——因为一旦 `succeeded` 达到 `completions`，Job 就完成了，**再调谐也不会重新跑**（它不会把自己的计数器归零）。
 
@@ -547,7 +538,7 @@ Job 控制器看到 status.succeeded = 1 == completions
 
 **这就是"把命令式动作塞进声明式框架"的标准手法**，也是你写自己的控制器时可以借鉴的思路（第 4 章说过）。
 
-### 关键字段
+#### 关键字段
 
 ```yaml
 apiVersion: batch/v1
@@ -587,11 +578,11 @@ spec:
 | `ttlSecondsAfterFinished` | 无 | 完成后 N 秒自动删除 Job 及其 Pod（**不设则永远保留**） |
 | `restartPolicy` | — | **必须是 `OnFailure` 或 `Never`**（`Always` 会让 Job 永远不结束） |
 
-> **`ttlSecondsAfterFinished` 值得单独提醒**：**默认不设的话，Job 和它的 Pod 会一直留着。**
->
-> 一个每天跑一次的 CronJob，如果每个 Job 都留着完整的 Pod（含日志），**几周后你会发现自己有几千个 Completed 的 Pod 占着 etcd 空间**（第 3 章讲过 etcd 的容量限制）。
+**`ttlSecondsAfterFinished` 值得单独提醒**：**默认不设的话，Job 和它的 Pod 会一直留着。**
 
-### 两种并行模式
+一个每天跑一次的 CronJob，如果每个 Job 都留着完整的 Pod（含日志），**几周后你会发现自己有几千个 Completed 的 Pod 占着 etcd 空间**（第 3 章讲过 etcd 的容量限制）。
+
+#### 两种并行模式
 
 | 模式 | 配置 | 适用 |
 |---|---|---|
@@ -616,7 +607,7 @@ spec:
             - 'echo "我负责第 $JOB_COMPLETION_INDEX 个分片"; sleep 10'
 ```
 
-### Job 的状态与排查
+#### Job 的状态与排查
 
 ```bash
 kubectl get job db-migrate -n cloudnote
@@ -627,15 +618,15 @@ kubectl describe job db-migrate -n cloudnote | sed -n '/Events/,$p'
 kubectl logs job/db-migrate -n cloudnote            # Job 完成后日志还在
 ```
 
-> **注意**：**Job 完成后，Pod 不会被自动删除**（默认行为），状态是 `Completed`。
->
-> 这是**方便你看日志**（对照 `ttlSecondsAfterFinished` 的取舍）。**但看完了记得清理**，否则会越积越多。
+**注意**：**Job 完成后，Pod 不会被自动删除**（默认行为），状态是 `Completed`。
+
+这是**方便你看日志**（对照 `ttlSecondsAfterFinished` 的取舍）。**但看完了记得清理**，否则会越积越多。
 
 ---
 
-## 【积木 13-7】CronJob：定时任务
+### 13.7 CronJob：定时任务
 
-### 它是什么
+#### 它是什么
 
 **CronJob 不直接跑 Pod，它按时间表"产生 Job"。**
 
@@ -697,7 +688,7 @@ spec:
               persistentVolumeClaim: { claimName: backup-pvc }
 ```
 
-### 五个必须知道的坑
+#### 五个必须知道的坑
 
 **坑一：默认时区是 UTC**
 
@@ -717,7 +708,7 @@ spec:
 | **`Forbid`**（推荐） | **跳过这一轮**：上一轮没跑完就不再起 | **备份、报表这类不能重叠的任务** |
 | `Replace` | **杀掉上一轮，起新的** | 只需要最新结果的任务（如"同步最新配置"） |
 
-> **默认值是 `Allow`，这是危险的默认值。**一个耗时 2 小时的备份任务，如果每分钟触发一次，`Allow` 会让你同时跑着 120 个备份。
+**默认值是 `Allow`，这是危险的默认值。**一个耗时 2 小时的备份任务，如果每分钟触发一次，`Allow` 会让你同时跑着 120 个备份。
 
 **坑三：不保证"精确时刻"**
 
@@ -735,7 +726,7 @@ schedule: "0 3 * * *"
 
 **更要紧的是：任务必须幂等**（回到第 4 章）。
 
-> **CronJob 可能重复执行同一个任务**（比如控制器重启导致的重复触发、或者配置变更时的补跑）。**所以任何 CronJob 任务都必须是幂等的** —— 这是第 4 章那条"reconcile 里不做不可逆副作用"的同一类纪律在任务侧的体现。
+**CronJob 可能重复执行同一个任务**（比如控制器重启导致的重复触发、或者配置变更时的补跑）。**所以任何 CronJob 任务都必须是幂等的** —— 这是第 4 章那条"reconcile 里不做不可逆副作用"的同一类纪律在任务侧的体现。
 
 **坑四：可能补跑大量错过的任务**
 
@@ -745,13 +736,13 @@ schedule: "0 3 * * *"
 
 `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` 默认值是 **3 和 1**。听起来够用，但**每个"历史 Job"还带着它创建的 Pod 和日志**——真正占空间的是这些 Pod。
 
-> **所以：`ttlSecondsAfterFinished` 比 historyLimit 更值得设。**前者会真正清理 Pod。
+**所以：`ttlSecondsAfterFinished` 比 historyLimit 更值得设。**前者会真正清理 Pod。
 
 ---
 
-## 【积木 13-8】五种工作负载对照表与常见误用
+### 13.8 五种工作负载对照表与常见误用
 
-### 完整对照表（建议存下来）
+#### 完整对照表（建议存下来）
 
 | | Deployment | StatefulSet | DaemonSet | Job | CronJob |
 |---|---|---|---|---|---|
@@ -765,7 +756,7 @@ schedule: "0 3 * * *"
 | **更新方式** | 滚动更新 | 滚动更新（**倒序**） | 逐节点更新 | 一般不更新 | 改模板，新 Job 生效 |
 | **典型对象** | api / web / worker | postgres / kafka | fluent-bit / node-exporter | 数据迁移 | 备份 / 报表 |
 
-### 五个常见误用
+#### 五个常见误用
 
 | 误用 | 后果 | 应该用什么 |
 |---|---|---|
@@ -775,7 +766,7 @@ schedule: "0 3 * * *"
 | **用 Job 跑永不结束的服务** | `restartPolicy` 不能是 `Always`；Pod 跑完就 Complete | **Deployment** |
 | **StatefulSet 却不配 headless Service** | 创建失败（`serviceName` 是必填） | 补上 headless Service |
 
-### 判断流程（一个更完整的版本）
+#### 判断流程（一个更完整的版本）
 
 ```
 ① 这个进程是要一直运行，还是跑完就退出？
@@ -792,7 +783,7 @@ schedule: "0 3 * * *"
 
 ---
 
-## 【积木 13-9】动手：把四种工作负载都跑一遍
+### 13.9 动手：把四种工作负载都跑一遍
 
 配套脚本：
 
@@ -800,7 +791,7 @@ schedule: "0 3 * * *"
 bash cases/cloudnote/tools/workloads-lab.sh
 ```
 
-### 实验一：StatefulSet 的三个稳定
+#### 实验一：StatefulSet 的三个稳定
 
 ```bash
 kubectl apply -f cases/cloudnote/00-namespace.yaml
@@ -892,7 +883,7 @@ kubectl get pvc -n cloudnote
 kubectl delete pvc -n cloudnote -l app=postgres
 ```
 
-### 实验二：DaemonSet 真的是"每节点一个"
+#### 实验二：DaemonSet 真的是"每节点一个"
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -959,7 +950,7 @@ kubectl get deploy api -n cloudnote -o jsonpath='{.spec.replicas}{"\n"}'
 
 **如果你给集群加一个节点，DaemonSet 会自动在新节点上多跑一个 Pod**（Deployment 不会）。
 
-### 实验三：Job——把"一次性动作"声明化
+#### 实验三：Job——把"一次性动作"声明化
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -1047,7 +1038,7 @@ done
 
 **关键观察**：**每个 Pod 通过 `$JOB_COMPLETION_INDEX` 拿到自己的分片编号**（0、1、2、3、4）——这就是"分片任务"的标准做法。
 
-### 实验四：CronJob
+#### 实验四：CronJob
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -1102,7 +1093,7 @@ kubectl get jobs -n cloudnote -o name | grep every-minute
 
 **因为 `Forbid` 会跳过"上一轮还在跑"的那些触发点。**
 
-### 清理
+#### 清理
 
 ```bash
 bash cases/cloudnote/tools/workloads-lab.sh --cleanup
@@ -1110,16 +1101,14 @@ bash cases/cloudnote/tools/workloads-lab.sh --cleanup
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 13.10 本章要点
 
 1. **五种工作负载回答五个不同的问题**：Deployment（无状态 N 副本）、**StatefulSet（有状态、要身份和独立存储）**、**DaemonSet（每节点一个）**、Job（成功 N 次就结束）、CronJob（按时间表产生 Job）。**两个判断问题就能选对**：要一直跑还是跑完就结束？副本是完全对等的还是需要自己的身份？
 2. **StatefulSet 提供三个"稳定"**：**稳定网络身份**（有序编号 + headless Service 给的 Pod 级 DNS）、**稳定存储**（`volumeClaimTemplates` 给每个 Pod 独立 PVC，**重建后挂回原来那份**）、**有序启停**。它**只给地基，不给房子**——数据复制、选主、备份、升级全都要靠应用自己或 **Operator**。
 3. **DaemonSet 的语义是"每节点一个"，它会跟随节点数变化**；而 Deployment 的语义是"总共 N 个"，**和节点数无关**。这就是为什么"用 Deployment 代替 DaemonSet"会在节点扩容后丢掉新节点的日志。
 4. **Job 用"计数器"把命令式动作装进了声明式框架**——期望状态不是"执行某个动作"，而是 **`status.succeeded == spec.completions`**。这个状态**可以被持续维持**，所以不会重复执行。
 
-### 一张图收尾
+#### 本章全景图
 
 ```
             这个进程要一直跑吗？
@@ -1146,44 +1135,26 @@ DaemonSet  副本对等？  CronJob          Job
    稳定身份（-0/-1/-2 + Pod DNS）· 稳定存储（各自独立 PVC）· 有序启停
 ```
 
-### 自测题
+### 13.11 练习题
 
-1. 选择工作负载的两个核心判断问题是什么？（积木 13-1）
-2. `StatefulSet` 提供的三个"稳定"分别是什么？（积木 13-2）
-3. 为什么 StatefulSet 必须要配一个 **headless** Service？Pod 级 DNS 名是什么格式？（积木 13-2）
-4. `volumeClaimTemplates` 创建的 PVC 命名规则是什么？3 个副本会产生几个 PVC？（积木 13-2）
-5. **Pod 被删除重建后，StatefulSet 会挂回原来那个 PVC 吗？Deployment 呢？**（积木 13-2）
-6. 删除 StatefulSet 会删除它创建的 PVC 吗？这个行为的利弊各是什么？（积木 13-2）
-7. `podManagementPolicy` 的 `OrderedReady` 和 `Parallel` 有什么区别？后者会影响身份稳定性和独立存储吗？（积木 13-2）
-8. 哪些分布式系统必须依赖"有序启动"？为什么？（积木 13-2）
-9. **StatefulSet 不解决哪些问题？**至少说出四个。（积木 13-4）
-10. 用了 Operator 之后，你的 YAML 会发生什么变化？它替你做了哪些事？（积木 13-4）
-11. **`DaemonSet` 和"Deployment + N 副本"有什么本质区别？**节点扩容后各会发生什么？（积木 13-5）
-12. 为什么 DaemonSet 通常要配 `tolerations`？不配会怎样？（积木 13-5）
-13. `hostPath` 在第 9 章被称为反模式，为什么在 DaemonSet 里是正当用法？（积木 13-5）
-14. **Job 是怎么把"执行一次动作"转换成声明式的？**它的"期望状态"具体是什么表达式？（积木 13-6）
-15. `completions` 和 `parallelism` 分别控制什么？为什么 Job 的 `restartPolicy` 不能是 `Always`？（积木 13-6）
-16. `ttlSecondsAfterFinished` 不设会有什么后果？（积木 13-6）
-17. `completionMode: Indexed` 解决什么问题？Pod 怎么知道自己是第几个分片？（积木 13-6）
-18. CronJob 的默认时区是什么？为什么"定时任务时间不对"是最常见的坑？（积木 13-7）
-19. `concurrencyPolicy` 的三个值分别是什么行为？默认值是哪个、为什么说它危险？（积木 13-7）
-20. **为什么 CronJob 的任务必须是幂等的？**（积木 13-7）
-21. 列出五个常见的工作负载误用。（积木 13-8）
-
-### 下一章预告
-
-**第 14 章：实战总演习 —— CloudNote 从 0 到 1**
-
-13 章讲完了，零件都齐了。**下一章我们要把它们全装起来。**
-
-> 从空集群开始，把 CloudNote 完整部署一遍：命名空间、配置与密钥、`web`、`api`、`worker`、`postgres`、Service、Ingress、HPA、探针、打散策略——**一份一份 YAML 按顺序 apply，每一步都解释"为什么是这个顺序"**。
->
-> 然后我们会**故意把它打挂**：删掉数据库 Pod、把节点打上污点、篡改探针、跑一次坏版本发布——观察它在每一层的自愈表现，以及**哪些故障它救不了**。
->
-> 最后还有一份**上线前检查清单**（第 15 章的预告），把这 13 章里所有"必须配"的项汇总成一张可勾选的表。
-
-这一章会用到前面所有章节的知识，是整门课的**收拢点**。
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 14 章。*
+1. 选择工作负载的两个核心判断问题是什么？
+2. `StatefulSet` 提供的三个"稳定"分别是什么？
+3. 为什么 StatefulSet 必须要配一个 **headless** Service？Pod 级 DNS 名是什么格式？
+4. `volumeClaimTemplates` 创建的 PVC 命名规则是什么？3 个副本会产生几个 PVC？
+5. **Pod 被删除重建后，StatefulSet 会挂回原来那个 PVC 吗？Deployment 呢？**
+6. 删除 StatefulSet 会删除它创建的 PVC 吗？这个行为的利弊各是什么？
+7. `podManagementPolicy` 的 `OrderedReady` 和 `Parallel` 有什么区别？后者会影响身份稳定性和独立存储吗？
+8. 哪些分布式系统必须依赖"有序启动"？为什么？
+9. **StatefulSet 不解决哪些问题？**至少说出四个。
+10. 用了 Operator 之后，你的 YAML 会发生什么变化？它替你做了哪些事？
+11. **`DaemonSet` 和"Deployment + N 副本"有什么本质区别？**节点扩容后各会发生什么？
+12. 为什么 DaemonSet 通常要配 `tolerations`？不配会怎样？
+13. `hostPath` 在第 9 章被称为反模式，为什么在 DaemonSet 里是正当用法？
+14. **Job 是怎么把"执行一次动作"转换成声明式的？**它的"期望状态"具体是什么表达式？
+15. `completions` 和 `parallelism` 分别控制什么？为什么 Job 的 `restartPolicy` 不能是 `Always`？
+16. `ttlSecondsAfterFinished` 不设会有什么后果？
+17. `completionMode: Indexed` 解决什么问题？Pod 怎么知道自己是第几个分片？
+18. CronJob 的默认时区是什么？为什么"定时任务时间不对"是最常见的坑？
+19. `concurrencyPolicy` 的三个值分别是什么行为？默认值是哪个、为什么说它危险？
+20. **为什么 CronJob 的任务必须是幂等的？**
+21. 列出五个常见的工作负载误用。
