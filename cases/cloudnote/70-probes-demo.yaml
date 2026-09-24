@@ -1,0 +1,199 @@
+# ============================================================================
+# 第 11 章动手实验：探针与故障恢复的演示对象
+#
+# 四个对象，各演示一种「自愈」行为：
+#   crash-demo          启动即崩 → 观察 CrashLoopBackOff 的指数退避
+#   slow-start-broken   启动要 40 秒 + liveness 太急 → 永远起不来（反面教材）
+#   slow-start-fixed    同样的慢启动 + startupProbe → 正常启动（正面示范）
+#   probe-compare       三种探针都配好且分离的「正确姿势」参考
+#
+# 说明：前两个 Pod 是「故意坏掉」的，只在实验集群使用。
+#
+# 使用：
+#   kubectl apply -f 70-probes-demo.yaml
+#   kubectl get pods -n cloudnote -l purpose=chapter-11-demo \
+#     -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# ① 启动即崩：观察 CrashLoopBackOff 的指数退避
+#    退避节奏：10s → 20s → 40s → 80s … 上限 5 分钟
+#    如果容器连续正常运行 10 分钟，退避计时器重置
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crash-demo
+  namespace: cloudnote
+  labels:
+    purpose: chapter-11-demo
+spec:
+  containers:
+    - name: crasher
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[$(date +%T)] 我要崩溃了（模拟启动即失败）"
+          exit 1
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  restartPolicy: Always      # Deployment / 长期服务必须是 Always
+---
+# ---------------------------------------------------------------------------
+# ② 反面教材：慢启动 + liveness 太急 → 永远起不来
+#    启动需要 40 秒，但 liveness 从第 5 秒开始探、容错只有 3 × 5 = 15 秒
+#    结果：每次都在启动完成前被杀 → CrashLoopBackOff 死循环
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-start-broken
+  namespace: cloudnote
+  labels:
+    purpose: chapter-11-demo
+spec:
+  containers:
+    - name: slow
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[$(date +%T)] 开始启动，需要 40 秒……"
+          sleep 40
+          echo "[$(date +%T)] 启动完成，开始监听 8080"
+          while true; do
+            nc -l -p 8080 -e echo -e "HTTP/1.1 200 OK\r\n\r\nok" 2>/dev/null || sleep 1
+          done
+      ports:
+        - name: http
+          containerPort: 8080
+      # ❌ 错误配置：探针比应用启动快
+      livenessProbe:
+        httpGet:
+          path: /
+          port: http
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 3
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+---
+# ---------------------------------------------------------------------------
+# ③ 正面示范：同一个慢启动应用 + startupProbe → 正常启动
+#    最大允许启动时间 = failureThreshold × periodSeconds = 30 × 10 = 300 秒
+#    启动阶段 liveness / readiness 都被禁用，所以 liveness 可以配得很灵敏
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-start-fixed
+  namespace: cloudnote
+  labels:
+    purpose: chapter-11-demo
+spec:
+  containers:
+    - name: slow
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[$(date +%T)] 开始启动，需要 40 秒……"
+          sleep 40
+          echo "[$(date +%T)] 启动完成，开始监听 8080"
+          while true; do
+            nc -l -p 8080 -e echo -e "HTTP/1.1 200 OK\r\n\r\nok" 2>/dev/null || sleep 1
+          done
+      ports:
+        - name: http
+          containerPort: 8080
+      # ✅ 关键：给启动阶段留足时间，成功后自动交棒
+      startupProbe:
+        httpGet:
+          path: /
+          port: http
+        periodSeconds: 10
+        failureThreshold: 30
+      # ✅ 启动之后 liveness 可以很灵敏（启动期间它不执行）
+      livenessProbe:
+        httpGet:
+          path: /
+          port: http
+        periodSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /
+          port: http
+        periodSeconds: 5
+        failureThreshold: 3
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+---
+# ---------------------------------------------------------------------------
+# ④ 「正确姿势」参考：三种探针职责分离
+#    要点：
+#      /healthz  → 只检查进程自身（绝不查外部依赖）
+#      /readyz    → 检查「我现在能不能处理请求」（可以查依赖）
+#      startup    → 给初始化留时间
+#
+#    这里用 nginx 演示，所以探针都指向 /。
+#    换成真实应用时，请务必让 /healthz 和 /readyz 是两个不同的端点。
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-compare
+  namespace: cloudnote
+  labels:
+    purpose: chapter-11-demo
+    app: probe-compare
+spec:
+  containers:
+    - name: web
+      image: nginx:1.27-alpine
+      ports:
+        - name: http
+          containerPort: 80
+      # 启动探针：给初始化留时间（最多 10 × 6 = 60 秒）
+      startupProbe:
+        httpGet: { path: /, port: http }
+        periodSeconds: 2
+        failureThreshold: 30
+      # 就绪探针：决定「能不能收流量」。失败不会重启容器，只摘流量。
+      # 真实应用这里应该指向 /readyz，且可以检查依赖（数据库、缓存）
+      readinessProbe:
+        httpGet: { path: /, port: http }
+        periodSeconds: 3
+        failureThreshold: 3
+      # 存活探针：决定「要不要重启容器」。失败会杀容器。
+      # 真实应用这里应该指向 /healthz，且**只检查进程自身**
+      livenessProbe:
+        httpGet: { path: /, port: http }
+        periodSeconds: 10
+        failureThreshold: 3
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 96Mi

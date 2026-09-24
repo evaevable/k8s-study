@@ -27,6 +27,7 @@
 | `tools/config-lab.sh` | 配置注入实验（三路注入行为对比、Secret 解密实证、目录覆盖坑、optional） | 第 8 章 |
 | `tools/storage-lab.sh` | 存储实验（PVC vs emptyDir 的 A/B 对照、Pending→Bound、动态供给 Events、扩容、reclaimPolicy） | 第 9 章 |
 | `tools/scheduling-lab.sh` | 调度与资源实验（FailedScheduling、CPU 限流、OOMKilled、QoS 等级、打散软硬对比、taint 与 toleration） | 第 10 章 |
+| `tools/probes-lab.sh` | 探针与自愈实验（容器重启 vs Pod 重建、readiness 只摘流量、CrashLoopBackOff 退避、慢启动死循环与修复） | 第 11 章 |
 | `10-config.yaml` | ConfigMap `api-config` + Secret `api-secret`（含"Secret 不是加密"的安全说明） | 第 8 章 |
 | `18-config-demo.yaml` | 三种注入方式并存的演示 Pod（环境变量 / 目录挂载 / subPath） | 第 8 章 |
 | `20-api-deployment.yaml` | api 的 Deployment（含探针、资源、滚动更新策略） | 第 5 章 |
@@ -37,7 +38,7 @@
 | `45-pvc-demo.yaml` | PVC + 两个对照 Pod（PVC vs emptyDir），用于观察数据持久性差异 | 第 9 章 |
 | `50-postgres.yaml` | StatefulSet + PVC | 第 13 章 |
 | `60-hpa.yaml` | 自动扩缩容 | 第 12 章 |
-| `70-probes-demo.yaml` | 探针与故障恢复演示 | 第 11 章 |
+| `70-probes-demo.yaml` | 探针与自愈演示（CrashLoopBackOff 退避、慢启动死循环、startupProbe 修复、三探针职责分离） | 第 11 章 |
 | `kustomization.yaml` | 一键部署全部 | 第 14 章 |
 
 ## 使用方式
