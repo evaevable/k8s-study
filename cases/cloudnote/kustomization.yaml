@@ -1,0 +1,62 @@
+# ============================================================================
+# CloudNote 全量部署 —— Kustomize 聚合清单（第 14 章）
+#
+# 用途：一条命令把 CloudNote 的**生产形态**资源全部装起来。
+#
+#   kubectl apply -k cases/cloudnote/
+#
+# ⚠️ 两个必须知道的限制：
+#
+#   ① Kustomize 只帮你"一次性聚合提交"，它【不保证启动顺序】。
+#      比如 api 可能在 postgres 之前起来 → 连不上数据库 → CrashLoopBackOff。
+#      但这不是致命问题：等 postgres 就绪后，api 会自己恢复（第 4 章的调和循环）。
+#      想按顺序稳妥部署，用：
+#        bash cases/cloudnote/tools/capstone-lab.sh deploy
+#
+#   ② 它【不会等就绪】。apply 完立刻 get pods 会看到一堆 ContainerCreating。
+#
+# 另外：本清单只收录**生产形态**的资源。
+#       教学演示用的 15-pod-demo / 18-config-demo / 28-scheduling-demo /
+#       45-pvc-demo / 70-probes-demo 都是**故意制造异常**的，不在这里，
+#       需要时单独 apply。
+#
+# 前置条件：
+#   - 已安装 Ingress Controller（否则 40-ingress.yaml 的 ADDRESS 会是空的）
+#   - 已安装 metrics-server（否则 60-hpa.yaml 的 api 那个 HPA 会是 <unknown>）
+#   - 已安装 VPA 组件（否则 api-vpa 的 recommendation 是空的）
+#   这三个即使没装，apply 也不会失败 —— 只是对应功能不生效。
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 统一给所有资源加标签（方便 kubectl get -l、成本归属、以及 argo cd 识别）
+commonLabels:
+  app.kubernetes.io/part-of: cloudnote
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  # ── 阶段一：地基 ─────────────────────────────────────────────
+  - 00-namespace.yaml        # 命名空间必须最先（kubectl 会自动把 Namespace 排在前面）
+  - 10-config.yaml           # ConfigMap + Secret（api 启动时就要读）
+
+  # ── 阶段二：数据层 ───────────────────────────────────────────
+  - 50-postgres.yaml         # headless Service + StatefulSet（含 volumeClaimTemplates）
+
+  # ── 阶段三：应用层 ───────────────────────────────────────────
+  - 20-api-deployment.yaml   # 后端 API（含探针、资源、打散策略）
+  - 22-api-service.yaml      # 给 api 一个稳定地址
+  - 30-web.yaml              # 前端（Deployment + Service）
+  - 35-worker.yaml           # 异步任务（IO 密集，供第 12 章的 HPA 演示）
+
+  # ── 阶段四：入口与弹性 ───────────────────────────────────────
+  - 40-ingress.yaml          # 七层入口（依赖已存在的 Ingress Controller）
+  - 60-hpa.yaml              # HPA（api 按 CPU / worker 按队列）+ VPA（Off 模式）
+
+# 如果需要给所有资源统一加命名空间（本仓库各文件里已经写了 namespace，
+# 这里保持注释以避免重复变换）：
+# namespace: cloudnote
+
+# 如果想给所有镜像统一改 tag（比如 CI 里传版本号），用 images 字段：
+# images:
+#   - name: nginx
+#     newTag: "1.27-alpine"
