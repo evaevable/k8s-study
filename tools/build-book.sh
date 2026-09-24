@@ -30,6 +30,28 @@ PARTS = [
     ('附录', ['appendix-cheatsheet.md']),
 ]
 
+# mdBook 侧边栏用的短标题。
+# 原因：mdBook 会自动给每章编号，正文标题里的「第 N 章」会造成 "1. 第 1 章 …" 的重复，
+# 且完整副标题在 300px 宽的侧边栏里要折三行。BOOK.md 的目录仍用完整标题。
+SIDEBAR = {
+    '01-why-k8s.md': '为什么需要 Kubernetes',
+    '02-pod.md': '容器与 Pod',
+    '03-cluster-anatomy.md': '集群的解剖学',
+    '04-declarative-controller.md': '声明式 API 与控制器模式',
+    '05-deployment.md': 'Deployment 与滚动更新',
+    '06-service-network.md': 'Service、DNS 与数据面',
+    '07-ingress.md': 'Ingress 与南北向流量',
+    '08-configmap-secret.md': 'ConfigMap 与 Secret',
+    '09-storage.md': 'Volume、PV、PVC 与 StorageClass',
+    '10-scheduling.md': '调度与资源管理',
+    '11-self-healing.md': '探针与故障恢复',
+    '12-autoscaling.md': '弹性伸缩',
+    '13-workloads.md': '工作负载全景',
+    '14-capstone.md': '实战总演习：CloudNote 从 0 到 1',
+    '15-production.md': '生产实践与排错手册',
+    'appendix-cheatsheet.md': '附录　命令速查与术语对照',
+}
+
 
 def anchor_chapter(fname):
     """显式锚点 id：不依赖 GitHub 的 slug 推导，避免中文标题与全角空格带来的不确定性。"""
@@ -113,12 +135,20 @@ out = re.sub(r'\n{4,}', '\n\n\n', out).rstrip() + '\n'
 # ---------- 2) chapters/SUMMARY.md ----------
 s = ['# 目录', '', '[前言](preface.md)', '']
 for part, files in PARTS:
+    if part == '附录':
+        # 放在列表之外，mdBook 就不会给它编号（否则会显示成 "16. 附录"）
+        s.append('---')
+        s.append('')
+        for f in files:
+            s.append(f'[{SIDEBAR[f]}]({f})')
+        s.append('')
+        continue
     s.append(f'# {part}')
     s.append('')
     for f in files:
-        title, _, _, _ = read_chapter(f)
-        # mdBook 的 SUMMARY 每章一行；同一文件不可重复出现，故不在此展开小节
-        s.append(f'- [{title}]({f})')
+        # mdBook 的 SUMMARY 每章一行（同一文件不可重复出现，故不在此展开小节），
+        # 章内小节导航由 theme/pagetoc.js 在页面顶部生成
+        s.append(f'- [{SIDEBAR[f]}]({f})')
     s.append('')
 (ch / 'SUMMARY.md').write_text('\n'.join(s).rstrip() + '\n', encoding='utf-8')
 

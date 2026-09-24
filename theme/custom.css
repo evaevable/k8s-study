@@ -1,0 +1,262 @@
+/* 中文技术书的排版调整。全部基于 mdBook 自带的 CSS 变量，
+   因此在 light / rust / navy / coal / ayu 五套主题下都成立。 */
+
+:root {
+  /* 正文默认 750px，中文长表格会被挤成折行，放宽到 920px */
+  --content-max-width: 920px;
+  /* 侧边栏默认 300px，中文章节名偏长 */
+  --sidebar-width: 310px;
+  --book-cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+              "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  --book-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+}
+
+/* ---------- 正文 ---------- */
+
+.content {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", var(--book-cjk);
+  font-size: 1rem;
+  line-height: 1.85;
+  letter-spacing: 0.01em;
+}
+
+.content p,
+.content li {
+  line-height: 1.85;
+}
+
+.content p {
+  margin: 0.9em 0;
+}
+
+/* 中英混排时给英文/代码留出视觉间隙 */
+.content code {
+  font-family: var(--book-mono);
+  font-size: 0.875em;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+
+/* ---------- 标题层级：靠留白和细线建立节奏 ---------- */
+
+.content h1 {
+  font-size: 1.85em;
+  line-height: 1.4;
+  margin: 0 0 1.6em 0;
+  padding-bottom: 0.5em;
+  border-bottom: 2px solid var(--table-border-color, #ddd);
+}
+
+.content h2 {
+  font-size: 1.4em;
+  line-height: 1.45;
+  margin-top: 2.4em;
+  margin-bottom: 0.9em;
+  padding-top: 0.9em;
+  border-top: 1px solid var(--table-border-color, #ddd);
+}
+
+/* 小节标题（### N.M）是全书的主导航单位，给它最强的视觉权重 */
+.content h3 {
+  font-size: 1.28em;
+  line-height: 1.5;
+  margin-top: 2.2em;
+  margin-bottom: 0.8em;
+  padding-left: 0.6em;
+  border-left: 4px solid var(--links, #4183c4);
+}
+
+.content h4 {
+  font-size: 1.08em;
+  margin-top: 1.8em;
+  margin-bottom: 0.6em;
+  opacity: 0.92;
+}
+
+.content h5 {
+  font-size: 1em;
+  margin-top: 1.5em;
+  opacity: 0.85;
+}
+
+/* ---------- 表格：全书有大量对照表，这是重点 ---------- */
+
+.content table {
+  width: 100%;
+  margin: 1.4em 0;
+  border-collapse: collapse;
+  font-size: 0.94em;
+  line-height: 1.7;
+}
+
+.content table thead th {
+  background: var(--table-header-bg, #f2f2f2);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.content table th,
+.content table td {
+  border: 1px solid var(--table-border-color, #ddd);
+  padding: 0.55em 0.8em;
+  vertical-align: top;
+}
+
+.content table tbody tr:nth-child(even) td {
+  background: var(--table-alternate-bg, transparent);
+}
+
+/* 宽表格允许横向滚动，而不是把单元格压成一列一个字 */
+.content .table-wrapper {
+  overflow-x: auto;
+}
+
+/* ---------- 引用块：全书只剩 33 处，都是核心结论 ---------- */
+
+.content blockquote {
+  margin: 1.4em 0;
+  padding: 0.9em 1.2em;
+  border-left: 4px solid var(--quote-border, #7ea);
+  background: var(--quote-bg, rgba(0, 0, 0, 0.03));
+  border-radius: 0 4px 4px 0;
+  font-style: normal;
+}
+
+.content blockquote p:first-child {
+  margin-top: 0;
+}
+
+.content blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- 代码块与 ASCII 示意图 ---------- */
+
+.content pre {
+  line-height: 1.55;
+  border-radius: 5px;
+}
+
+.content pre > code {
+  font-size: 0.855em;
+  padding: 0;
+}
+
+/* 无语言标注的代码块多数是 ASCII 时序图 / 结构图，收紧行高防止错位 */
+.content pre > code.language-plaintext,
+.content pre > code:not([class]) {
+  line-height: 1.35;
+}
+
+/* ---------- Mermaid ---------- */
+
+.content .mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1.6em 0;
+  overflow-x: auto;
+}
+
+/* ---------- 侧边栏 ---------- */
+
+#sidebar {
+  font-size: 0.86rem;
+}
+
+.chapter {
+  line-height: 1.5;
+}
+
+.chapter li.chapter-item {
+  margin: 0.35em 0;
+  padding: 0 0 0 0.2em;
+}
+
+/* 篇名（SUMMARY.md 里的 # 标题）*/
+.chapter li.part-title {
+  margin-top: 1.5em;
+  margin-bottom: 0.4em;
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  text-transform: none;
+}
+
+.chapter li.chapter-item a.active {
+  font-weight: 600;
+}
+
+#sidebar .sidebar-scrollbox {
+  padding: 12px 16px 40px 16px;
+}
+
+/* ---------- 页内小节目录（由 theme/pagetoc.js 注入）---------- */
+
+details.pagetoc {
+  margin: 0 0 2.2em 0;
+  padding: 0.5em 1em;
+  border: 1px solid var(--table-border-color, #ddd);
+  border-radius: 5px;
+  background: var(--quote-bg, rgba(0, 0, 0, 0.02));
+  font-size: 0.92em;
+}
+
+details.pagetoc > summary {
+  cursor: pointer;
+  font-weight: 600;
+  outline: none;
+  padding: 0.2em 0;
+  opacity: 0.85;
+}
+
+details.pagetoc > summary::marker {
+  color: var(--links, #4183c4);
+}
+
+details.pagetoc ol {
+  margin: 0.6em 0 0.3em 0;
+  padding-left: 1.4em;
+  columns: 2;
+  column-gap: 2em;
+}
+
+details.pagetoc ol li {
+  margin: 0.25em 0;
+  line-height: 1.6;
+  break-inside: avoid;
+}
+
+details.pagetoc a {
+  text-decoration: none;
+}
+
+details.pagetoc a:hover {
+  text-decoration: underline;
+}
+
+@media only screen and (max-width: 900px) {
+  details.pagetoc ol {
+    columns: 1;
+  }
+}
+
+/* ---------- 打印 ---------- */
+
+@media print {
+  details.pagetoc {
+    display: none;
+  }
+
+  .content h2,
+  .content h3 {
+    page-break-after: avoid;
+  }
+
+  .content table,
+  .content pre {
+    page-break-inside: avoid;
+  }
+}

@@ -120,6 +120,15 @@ mdbook build
 
 书稿源目录就是 `chapters/`（`book.toml` 里 `src = "chapters"`），目录结构由 [chapters/SUMMARY.md](chapters/SUMMARY.md) 定义。这样做的理由是：不必把 16 个正文文件搬到 `src/` 下，章节之间的交叉引用与 README 里的链接都无需改动，而 `cases/` 下的 YAML 与实验脚本也天然不会被当成章节收进书里。
 
+在线版的排版由两个文件定制，都基于 mdBook 自带的 CSS 变量，因此五套主题（light / rust / navy / coal / ayu）下都成立：
+
+| 文件 | 作用 |
+|---|---|
+| `theme/custom.css` | 中文字体栈与行高、正文宽度放宽到 920px、对照表的边框与斑马纹、小节标题的左侧色条 |
+| `theme/pagetoc.js` | 在每章页面顶部注入可折叠的**本章小节目录** |
+
+侧边栏只到章级，是 mdBook 的限制：`SUMMARY.md` 不允许同一个文件出现两次，加小节会报 "included twice"。每章有 8~12 个小节，所以章内导航交给页内目录。侧边栏显示的是短标题（`tools/build-book.sh` 里的 `SIDEBAR` 表），因为 mdBook 会自动编号，正文标题里的「第 N 章」会重复。
+
 ---
 
 ## 修改与重新生成
