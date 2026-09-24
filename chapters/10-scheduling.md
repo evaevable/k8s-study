@@ -1,17 +1,10 @@
 # 第 10 章　调度与资源管理：requests、limits、QoS 与亲和性
 
-> **本章导读**
-> - 建议用时：65 分钟（含 25 分钟动手）
-> - 前置知识：第 2 章（容器重启 vs Pod 重启）、第 3 章（Filter / Score 两阶段）
-> - 读完你应该能回答四个问题：
->   1. `requests` 和 `limits` 到底有什么区别？**只写 `limits` 会发生什么？**
->   2. 为什么 CPU 超了只是变慢，**内存超了却直接被杀死**？
->   3. `QoS` 三个等级是谁决定的、**决定了什么**？（提示：不是"服务质量"的字面意思）
->   4. 怎么让两个副本**强制分散到不同节点**？为什么 `podAntiAffinity` 不总是好选择？
+第 3 章介绍过调度器的两个阶段（Filter 与 Score），当时是旁观。本章反过来，讲如何控制它。
 
-第 3 章我们看过调度器的两个阶段（Filter / Score），当时是"看别人干活"。这一章**反过来——我们要控制它**。
+本章有两条并行的主线，阅读时需要分清。第一条是**资源维度**（10.1~10.4）：`requests` 与 `limits` 分别写给谁看、CPU 与内存为何一个被限流一个被杀死、QoS 等级由什么推导、节点资源不足时谁先被驱逐——在这条线上，应用是被动承受的一方。第二条是**位置维度**（10.5~10.8）：`nodeSelector`、`nodeAffinity`、`taints` 与 `tolerations`、`topologySpreadConstraints`——在这条线上，应用主动干预调度器的选择。两条线合起来才是完整答案：Pod 被放到哪台机器上，以及在那台机器上能拿到多少资源。
 
-但在开始之前，先建立本章最重要的一条认知：
+展开之前，先建立本章最重要的一条认知：
 
 > **调度器不是全知的。它所有的判断，都只基于你在 YAML 里写的那两行数字——`requests`。**
 >
@@ -21,7 +14,7 @@
 
 ---
 
-## 【积木 10-1】先分清：requests 是"预留"，limits 是"天花板"
+### 10.1 先分清：requests 是"预留"，limits 是"天花板"
 
 这是最基础、也最容易搞错的一组概念。
 
@@ -45,20 +38,20 @@ resources:
 | 超过的后果 | 不适用（只是预留） | **CPU：被限流** / **内存：被杀死** |
 | 类比 | 订酒店时"我要一间大床房" | 房间里"电表最大 3 千瓦" |
 
-### 组合起来只有四种情况，每种都有不同含义
+#### 组合起来只有四种情况，每种都有不同含义
 
 | requests | limits | 含义 | 风险 |
 |---|---|---|---|
 | 都写 | 都有 | **最规范**：预留明确，上限明确 | 无 |
-| 都写，且 `requests == limits` | | **Guaranteed QoS**（积木 10-3） | 资源利用率可能偏低 |
-| **只写 limits** | | ⚠️ **requests 会被自动设成等于 limits** | **调度变保守**：明明够用，却因为"预留"太高而调度不上去 |
-| **都不写** | | **BestEffort QoS** | ⚠️ **节点资源紧张时第一个被驱逐**，且调度器只能瞎猜 |
+| 都写，且 `requests == limits` | | **Guaranteed QoS** | 资源利用率可能偏低 |
+| **只写 limits** | |  **requests 会被自动设成等于 limits** | **调度变保守**：明明够用，却因为"预留"太高而调度不上去 |
+| **都不写** | | **BestEffort QoS** |  **节点资源紧张时第一个被驱逐**，且调度器只能瞎猜 |
 
-> **第三行是关键，很多人不知道**：如果你只写了 `limits`，**K8s 会把 `requests` 默认设成和 `limits` 一样**。
->
-> 所以那个"我明明留了余量，为什么 Pod 调度不上去"的问题，答案往往是你无意中把 requests 抬高了。
+**第三行是关键，很多人不知道**：如果你只写了 `limits`，**K8s 会把 `requests` 默认设成和 `limits` 一样**。
 
-### 单位：写错一个字母，差 1000 倍
+所以那个"我明明留了余量，为什么 Pod 调度不上去"的问题，答案往往是你无意中把 requests 抬高了。
+
+#### 单位：写错一个字母，差 1000 倍
 
 | 资源 | 单位 | 说明 |
 |---|---|---|
@@ -72,19 +65,19 @@ memory: 128Mi   # 128 * 1024 * 1024 字节
 memory: 128M    # 128 * 1000 * 1000 字节（少 4.8%）
 ```
 
-> **顺带一个容易被忽略的点**：`resources` 是**每个容器**的，不是每个 Pod 的。
->
-> **Pod 的总 requests = 所有容器 requests 之和。**
->
-> 而如果有 init 容器（第 2 章），调度时取的是：**`max(最大的 init 容器 requests, 所有普通容器 requests 之和)`**——因为 init 是串行执行的，不会同时占资源。
+**顺带一个容易被忽略的点**：`resources` 是**每个容器**的，不是每个 Pod 的。
+
+**Pod 的总 requests = 所有容器 requests 之和。**
+
+而如果有 init 容器（第 2 章），调度时取的是：**`max(最大的 init 容器 requests, 所有普通容器 requests 之和)`**——因为 init 是串行执行的，不会同时占资源。
 
 ---
 
-## 【积木 10-2】CPU 和内存：两种性质完全不同的资源
+### 10.2 CPU 和内存：两种性质完全不同的资源
 
 **这一块解释了 K8s 资源管理里最反直觉的一堆现象。**
 
-### 核心区别：可压缩 vs 不可压缩
+#### 核心区别：可压缩 vs 不可压缩
 
 ```mermaid
 flowchart TB
@@ -106,7 +99,7 @@ flowchart TB
 
 > **`limits` 对内存来说是"生死线"，对 CPU 来说只是"速度旋钮"。**
 
-### 于是产生了两个高频困惑
+#### 于是产生了两个高频困惑
 
 **困惑一："为什么我的服务只是变慢了，没人报警？"**
 
@@ -143,7 +136,7 @@ env:
 
 **关键是把堆上限设成 limit 的 70%~80%**，给 JVM 的堆外内存（Metaspace、线程栈、DirectBuffer、GC 结构）留出空间。设成 100% 一定会被 OOMKilled。
 
-### 两种"OOM"要分清
+#### 两种"OOM"要分清
 
 这是个值得单独澄清的点：
 
@@ -156,9 +149,9 @@ env:
 
 ---
 
-## 【积木 10-3】QoS 等级：谁决定的、决定了什么
+### 10.3 QoS 等级：谁决定的、决定了什么
 
-### 三个等级怎么来的
+#### 三个等级怎么来的
 
 **你不用手写 QoS，它是 K8s 根据你的 `requests` / `limits` 自动推导出来的：**
 
@@ -173,9 +166,9 @@ env:
 kubectl get pod <pod> -n cloudnote -o jsonpath='{.status.qosClass}'
 ```
 
-### QoS 决定了什么：**被驱逐的顺序**
+#### QoS 决定了什么：**被驱逐的顺序**
 
-这是最重要的一环。当节点资源不足时（积木 10-4 会讲），kubelet 要挑一些 Pod 杀掉来保住节点。**它按 QoS 等级从低到高杀**：
+这是最重要的一环。当节点资源不足时（第 10.4 节会讲），kubelet 要挑一些 Pod 杀掉来保住节点。**它按 QoS 等级从低到高杀**：
 
 ```
 优先被杀 ←──────────────────────────────→ 最后被杀
@@ -196,7 +189,7 @@ kubectl get pod <pod> -n cloudnote -o jsonpath='{.status.qosClass}'
 | `Burstable` | 2 ~ 999 | 按用量比例 |
 | `BestEffort` | **1000** | **第一个被杀** |
 
-### 一个需要纠正的认知
+#### 一个需要纠正的认知
 
 > **QoS 不是"服务质量"的意思，它不是性能保证，而是"被驱逐的优先级"。**
 
@@ -214,13 +207,13 @@ kubectl get pod <pod> -n cloudnote -o jsonpath='{.status.qosClass}'
 | **批处理 / 离线任务** | **`BestEffort` 或低 requests 的 `Burstable`** | **故意让它成为"可牺牲的"**，把资源让给在线服务 |
 | **监控 / 日志采集（DaemonSet）** | `Burstable` 小 requests | 它必须活着，但不需要大资源 |
 
-> **把"可被牺牲"这件事显式表达出来，本身就是一种设计。**让离线任务的 QoS 最低，是让它"在资源紧张时主动让路"——这比事后人工干预可靠得多。
+**把"可被牺牲"这件事显式表达出来，本身就是一种设计。**让离线任务的 QoS 最低，是让它"在资源紧张时主动让路"——这比事后人工干预可靠得多。
 
 ---
 
-## 【积木 10-4】节点资源不足时会发生什么
+### 10.4 节点资源不足时会发生什么
 
-### kubelet 的驱逐机制
+#### kubelet 的驱逐机制
 
 kubelet 会持续监控几种"压力信号"：
 
@@ -248,7 +241,7 @@ kubelet 会持续监控几种"压力信号"：
 kubectl describe node <node> | grep -A6 Conditions
 ```
 
-### 软驱逐 vs 硬驱逐
+#### 软驱逐 vs 硬驱逐
 
 | 类型 | 行为 | 默认 |
 |---|---|---|
@@ -261,9 +254,9 @@ kubectl describe node <node> | grep -A6 Conditions
 - **不要让节点跑满**：`requests` 之和应该控制在节点可分配资源的 **70%~80%**，给突发留余量
 - 容器里的日志**必须限制大小**，否则写满 `nodefs` 会导致整节点被驱逐（这是很常见的事故）
 
-### 一个重要的认知
+#### 一个重要的认知
 
-> **Pod 被驱逐，不代表节点坏了。它是节点在自保。**
+**Pod 被驱逐，不代表节点坏了。它是节点在自保。**
 
 ```
 节点内存不够
@@ -279,27 +272,9 @@ kubelet 挑最"可牺牲"的 Pod（BestEffort → Burstable）杀掉
 
 ---
 
-## 【积木 10-5】控制 Pod 落在哪：四个工具，两个方向
+### 10.5 控制 Pod 落在哪：四个工具，两个方向
 
-### 先说明白：为什么从这一节开始换话题了
-
-第 10 章其实有**两条主线**，前面的积木和这一节之后是分开的：
-
-```
-【主线一】资源维度 —— 积木 10-1 ~ 10-4
-    requests / limits → CPU vs 内存 → QoS → 驱逐
-    回答的问题："我申请多少资源？超了会怎样？"
-    性质：被动承受（资源不够时系统会怎么处理我）
-
-【主线二】位置维度 —— 积木 10-5 ~ 10-7
-    我要去哪 / 我不能去哪 / 我要和谁在一起
-    回答的问题："我被放到哪台机器上？"
-    性质：主动控制（我主动干预调度器的选择）
-```
-
-**两条线合起来才是完整答案**：`Pod` 被调度到**哪台机器**（位置）+ 在那台机器上**得到多少资源**（资源）。
-
-### 为什么需要第二条主线
+#### 为什么需要主动干预调度
 
 因为**调度器的默认行为是"你不指定，它就自己挑"**——按第 3 章讲的 `LeastAllocated`（资源使用率低的节点得分高）尽量均衡。**大多数时候这样是对的**，你什么都不用配。
 
@@ -313,20 +288,20 @@ kubelet 挑最"可牺牲"的 Pod（BestEffort → Burstable）杀掉
 | 有许可证限制的商业软件 | 只能装在指定机器上，装错了直接违规 |
 | 你想让副本分散到不同机器 | 调度器只看资源余额，**可能把 3 个副本全放在同一台机器上**（第 2 章埋的坑） |
 
-**最后一行特别重要**：调度器**没有"我的副本要分散"这个概念**——除非你告诉它。这是积木 10-6 要解决的问题。
+**最后一行特别重要**：调度器**没有"我的副本要分散"这个概念**——除非你告诉它。这是第 10.6 节要解决的问题。
 
-### 这一节还把第 3 章欠的一笔账还上了
+#### 补上第 3 章 Filter 阶段的配置方法
 
-第 3 章讲 Filter 阶段时，列过这样一张表：
+第 3 章讲 Filter 阶段时列过这样一张表：
 
 | 过滤条件 | 检查什么 | Events 里的关键词 |
 |---|---|---|
 | 节点亲和性 | `nodeAffinity` / `nodeSelector` 是否满足 | `didn't match node selector` |
 | 污点与容忍 | 节点有污点，Pod 没有对应的容忍 | `node(s) had untolerated taint` |
 
-当时只是"知道有这些东西"。**这一节就是那些 Filter 条件的配置方法**——学完之后，你写的几行 YAML 会直接变成调度器的过滤规则。
+当时只说明了这些条件的存在。本节给出它们的配置方法：这几行 YAML 会直接变成调度器的过滤规则。
 
-### 三个诉求，两套写法
+#### 三个诉求，两套写法
 
 有四个工具，**但它们分成两个相反的方向**——这是理解它们的关键。
 
@@ -348,13 +323,13 @@ flowchart TB
 
 **最需要记住的一点**：
 
-> **`nodeAffinity` 是 Pod 在"挑"节点（你写在 Pod 的 YAML 里）；`taint` 是节点在"拒绝"Pod（你写在节点上）。**
->
-> **方向完全相反。**
->
-> 这不是文字游戏，而是**团队治理上的分工**：`taint` 是**平台团队的权力**（保护专用资源，应用团队改自己的 YAML 也抢不走）；`affinity` 是**应用团队的权力**（表达自己的需求，不需要求平台团队改节点）。
+**`nodeAffinity` 是 Pod 在"挑"节点（你写在 Pod 的 YAML 里）；`taint` 是节点在"拒绝"Pod（你写在节点上）。**
 
-### ① `nodeSelector`：最简单，只能精确匹配
+**方向完全相反。**
+
+这不是文字游戏，而是**团队治理上的分工**：`taint` 是**平台团队的权力**（保护专用资源，应用团队改自己的 YAML 也抢不走）；`affinity` 是**应用团队的权力**（表达自己的需求，不需要求平台团队改节点）。
+
+#### ① `nodeSelector`：最简单，只能精确匹配
 
 ```yaml
 spec:
@@ -370,7 +345,7 @@ spec:
 kubectl label node <node-name> disktype=ssd
 ```
 
-### ② `nodeAffinity`：表达力强，且分硬软
+#### ② `nodeAffinity`：表达力强，且分硬软
 
 ```yaml
 spec:
@@ -400,13 +375,13 @@ spec:
 
 **"IgnoredDuringExecution"是什么意思？**
 
-> **它指的是"调度之后如果标签变了，不驱逐已运行的 Pod"。**
->
-> 也就是说：**亲和性只在调度那一刻生效，之后节点标签被改动不会把 Pod 赶走。**
->
-> 这个细节很重要——不要以为改了节点标签就能把 Pod "推走"，那要配合 `taint` + `NoExecute`（下面讲）。
+**它指的是"调度之后如果标签变了，不驱逐已运行的 Pod"。**
 
-### ③ `podAffinity` / `podAntiAffinity`：Pod 之间的相互位置
+也就是说：**亲和性只在调度那一刻生效，之后节点标签被改动不会把 Pod 赶走。**
+
+这个细节很重要——不要以为改了节点标签就能把 Pod "推走"，那要配合 `taint` + `NoExecute`（下面讲）。
+
+#### ③ `podAffinity` / `podAntiAffinity`：Pod 之间的相互位置
 
 ```yaml
 spec:
@@ -428,11 +403,11 @@ spec:
 | `topology.kubernetes.io/zone` | **同一可用区** |
 | `topology.kubernetes.io/region` | 同一地域 |
 
-> **注意：`podAntiAffinity` 的 `required` 版本有个真实的陷阱**——如果集群只有 2 个节点，而你要 3 个副本，第 3 个会**永远 Pending**（因为找不到第三个"没有同类 Pod 的节点"）。
->
-> 用 `preferred` 版本会更好，或者用下面的 `topologySpreadConstraints`。
+**注意：`podAntiAffinity` 的 `required` 版本有个真实的陷阱**——如果集群只有 2 个节点，而你要 3 个副本，第 3 个会**永远 Pending**（因为找不到第三个"没有同类 Pod 的节点"）。
 
-### ④ `taints` 与 `tolerations`：方向相反的那个
+用 `preferred` 版本会更好，或者用下面的 `topologySpreadConstraints`。
+
+#### ④ `taints` 与 `tolerations`：方向相反的那个
 
 **污点是"节点主动排斥"**：
 
@@ -466,14 +441,14 @@ spec:
 | `node.kubernetes.io/not-ready` | 失联的节点 | 第 3 章那个故障故事里就是这个 |
 | `node.kubernetes.io/unreachable` | 网络不通的节点 | 同上 |
 | `node-role.kubernetes.io/control-plane` | **控制平面节点** | **所以你的业务 Pod 不会跑到控制平面上** |
-| `node.kubernetes.io/memory-pressure` | 内存紧张的节点 | 积木 10-4 |
+| `node.kubernetes.io/memory-pressure` | 内存紧张的节点 | 第 10.4 节 |
 
 ```bash
 # 看看你集群里的节点都有什么污点
 kubectl get nodes -o custom-columns='NAME:.metadata.name,TAINTS:.spec.taints[*].key'
 ```
 
-### 五个工具对比表
+#### 五个工具对比表
 
 | 工具 | 方向 | 表达力 | 强制性 | 典型场景 |
 |---|---|---|---|---|
@@ -492,20 +467,20 @@ kubectl get nodes -o custom-columns='NAME:.metadata.name,TAINTS:.spec.taints[*].
 需要"把这台机器留给特定用途"   → taints + tolerations
 ```
 
-> **一个关键的心智模型**：
->
-> - **`nodeAffinity` 是 Pod 在"挑"节点** —— 你在 Pod 的 YAML 里写
-> - **`taint` 是节点在"拒绝"Pod** —— 你在节点的配置里写
->
-> **方向相反。**所以团队治理上：**`taint` 是平台团队的权力（保护专用资源），`affinity` 是应用团队的权力（表达自己的需求）。**这个分工很实用。
+**一个关键的心智模型**：
+
+- **`nodeAffinity` 是 Pod 在"挑"节点** —— 你在 Pod 的 YAML 里写
+- **`taint` 是节点在"拒绝"Pod** —— 你在节点的配置里写
+
+**方向相反。**所以团队治理上：**`taint` 是平台团队的权力（保护专用资源），`affinity` 是应用团队的权力（表达自己的需求）。**这个分工很实用。
 
 ---
 
-## 【积木 10-6】`topologySpreadConstraints`：比反亲和性更好的打散方式
+### 10.6 `topologySpreadConstraints`：比反亲和性更好的打散方式
 
-### 先回顾第 2 章埋的那个坑
+#### 副本分散为什么不能交给调度器默认行为
 
-> "我有 2 个副本，所以挂一个节点没关系。"——**如果这 2 个副本恰好都在同一台机器上，挂一个节点就等于全挂。**
+"我有 2 个副本，所以挂一个节点没关系。"——**如果这 2 个副本恰好都在同一台机器上，挂一个节点就等于全挂。**
 
 怎么保证它们分散？`podAntiAffinity` 能用，但它在**节点数量少**的时候会失效（`required` 会直接让 Pod 卡在 Pending）。
 
@@ -524,14 +499,14 @@ spec:
 
 **读法是**：
 
-> "按 `hostname` 这个维度分组，各组之间 `app=api` 的 Pod 数量**最多相差 1 个**。做不到就别调度。"
+"按 `hostname` 这个维度分组，各组之间 `app=api` 的 Pod 数量**最多相差 1 个**。做不到就别调度。"
 
 **它的优点**：不要求"必须没有同类"，只要求"**尽量均衡**"。所以：
 
 | 场景 | `podAntiAffinity`（required） | `topologySpreadConstraints` |
 |---|---|---|
 | 3 副本 / 3 节点 | 完美分散 | 完美分散 |
-| **3 副本 / 2 节点** | **第 3 个永远 Pending** ❌ | **合理安排成 2+1** ✅ |
+| **3 副本 / 2 节点** | **第 3 个永远 Pending**  | **合理安排成 2+1**  |
 | 需要跨可用区均衡 | 要写两层 | 写一条就够 |
 
 **三个关键字段**：
@@ -542,7 +517,7 @@ spec:
 | `topologyKey` | 按什么维度分组（`hostname` / `zone` / 自定义标签） |
 | `whenUnsatisfiable` | **`DoNotSchedule`**（硬性，做不到就不调度）/ **`ScheduleAnyway`**（软性，尽量均衡但不阻塞调度） |
 
-### 生产上的推荐写法：硬软结合
+#### 生产上的推荐写法：硬软结合
 
 ```yaml
 spec:
@@ -568,11 +543,11 @@ spec:
 - **可用区**是"硬"的：一个可用区整体故障很常见，必须强制均衡
 - **节点**是"软"的：集群扩容 / 缩容时节点数会变，硬性要求可能导致调度不上
 
-> **一个务实的建议**：**至少做到"同一个应用的副本不在同一个节点上"。**如果节点数 ≥ 副本数，用 `DoNotSchedule`；否则用 `ScheduleAnyway`。**但不要忘了，`ScheduleAnyway` 在节点不足时仍然会把两个副本放在一起**——所以根子上还是要保证节点数够。
+**一个务实的建议**：**至少做到"同一个应用的副本不在同一个节点上"。**如果节点数 ≥ 副本数，用 `DoNotSchedule`；否则用 `ScheduleAnyway`。**但不要忘了，`ScheduleAnyway` 在节点不足时仍然会把两个副本放在一起**——所以根子上还是要保证节点数够。
 
 ---
 
-## 【积木 10-7】把资源与调度写进生产配置
+### 10.7 把资源与调度写进生产配置
 
 现在把这一章的东西拼进 CloudNote 的 `api`：
 
@@ -627,7 +602,7 @@ spec:
           # 兼顾了调度效率（requests 小、装得多）与安全性（有天花板）
 ```
 
-### 五个必须避免的反模式
+#### 五个必须避免的反模式
 
 | 反模式 | 后果 | 正确做法 |
 |---|---|---|
@@ -637,9 +612,9 @@ spec:
 | **`limits.cpu` 设得过小** | 静默的 CPU 限流，P99 延迟暴涨且无人报警 | 监控 throttled 比例，控制在 20% 以内 |
 | **`replicas: 1` 且没配打散** | 单副本 = 单点；多副本但同节点 = 假高可用 | 副本数 ≥ 2 + topologySpread |
 
-> **第 4 条特别值得强调**：**CPU 限流是这一章最隐蔽的问题**——它不产生事件、不增加 `RESTARTS`、不影响 Pod 状态，只是让你的服务变慢。**唯一可靠的发现方式是监控 `container_cpu_cfs_throttled_seconds_total`。**
+**第 4 条特别值得强调**：**CPU 限流是这一章最隐蔽的问题**——它不产生事件、不增加 `RESTARTS`、不影响 Pod 状态，只是让你的服务变慢。**唯一可靠的发现方式是监控 `container_cpu_cfs_throttled_seconds_total`。**
 
-### 顺带认识两个"批量兜底"的对象
+#### 顺带认识两个"批量兜底"的对象
 
 除了在 Pod 里逐个写，还有两个命名空间级别的策略对象（第 15 章会细讲）：
 
@@ -672,7 +647,7 @@ spec:
 
 ---
 
-## 【积木 10-8】动手：把资源与调度的行为都看一遍
+### 10.8 动手：把资源与调度的行为都看一遍
 
 配套脚本：
 
@@ -680,7 +655,7 @@ spec:
 bash cases/cloudnote/tools/scheduling-lab.sh
 ```
 
-### 第一步：看看节点的"可分配资源"和当前分配情况
+#### 第一步：看看节点的"可分配资源"和当前分配情况
 
 ```bash
 # 节点的可分配资源（去掉系统组件占用后的）
@@ -705,7 +680,7 @@ Allocated resources:
 - **`Requests` 那一列才是调度的依据**（百分比超过 100% 就再也放不下新 Pod）
 - **`Limits` 可以超卖**（175% 很正常），因为不是所有 Pod 会同时打满
 
-### 第二步：观察一次"因为 requests 太高而调度不上去"
+#### 第二步：观察一次"因为 requests 太高而调度不上去"
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -745,7 +720,7 @@ Events:
 kubectl delete pod too-big -n cloudnote
 ```
 
-### 第三步：观察 CPU 限流（静默的变慢）
+#### 第三步：观察 CPU 限流（静默的变慢）
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -783,13 +758,13 @@ kubectl top pod cpu-throttle -n cloudnote 2>/dev/null || echo "（需要 metrics
 
 **关键观察**：Pod **完全正常**——`STATUS: Running`、`RESTARTS: 0`、没有任何 Events。**但它的 CPU 被限制在 50m，任务会跑得极慢。**
 
-> **这就是"CPU 限流是静默的"的实证。**生产上如果没有监控 `throttled` 指标，你只会看到"服务变慢了"，然后去查代码、查数据库、查网络——**永远想不到是 `limits.cpu` 设小了。**
+**这就是"CPU 限流是静默的"的实证。**生产上如果没有监控 `throttled` 指标，你只会看到"服务变慢了"，然后去查代码、查数据库、查网络——**永远想不到是 `limits.cpu` 设小了。**
 
 ```bash
 kubectl delete pod cpu-throttle -n cloudnote
 ```
 
-### 第四步：观察 OOMKilled（内存的不可压缩性）
+#### 第四步：观察 OOMKilled（内存的不可压缩性）
 
 ```bash
 kubectl apply -f cases/cloudnote/28-scheduling-demo.yaml
@@ -818,7 +793,7 @@ kubectl get pod oom-demo -n cloudnote \
 
 **这两步的对比，就是"可压缩 vs 不可压缩"最直观的证明。**
 
-### 第五步：看三个 QoS 等级长什么样
+#### 第五步：看三个 QoS 等级长什么样
 
 ```bash
 kubectl get pods -n cloudnote -l purpose=chapter-10-demo \
@@ -838,7 +813,7 @@ done
 | `qos-burstable` | **Burstable** |
 | `qos-besteffort` | **BestEffort** |
 
-### 第六步：观察打散是否生效
+#### 第六步：观察打散是否生效
 
 ```bash
 # 看 api 的副本分别落在哪些节点
@@ -864,9 +839,9 @@ kubectl get pods -n cloudnote -l app=spread-hard -o custom-columns='NAME:.metada
 Warning  FailedScheduling  ...  3 node(s) didn't match pod topology spread constraints
 ```
 
-> **这就是"硬性打散"的代价**：它保证了不均衡就绝不调度。**所以在节点数少于副本数时，必须改用 `ScheduleAnyway`**——这是积木 10-6 那个建议的实证。
+**这就是"硬性打散"的代价**：它保证了不均衡就绝不调度。**所以在节点数少于副本数时，必须改用 `ScheduleAnyway`**——这是第 10.6 节那个建议的实证。
 
-### 第七步：体验 taint 如何阻止调度
+#### 第七步：体验 taint 如何阻止调度
 
 ```bash
 # 给你集群里的某个节点打个污点（换成真实节点名）
@@ -923,9 +898,9 @@ kubectl get pod taint-tolerated -n cloudnote -o custom-columns='NAME:.metadata.n
 kubectl taint nodes "$NODE" purpose=reserved:NoSchedule-
 ```
 
-> **这就是 `taint` 的典型用法：把一台机器"保留"给特定用途**（GPU 节点、专用数据库节点、控制平面）。它是**平台团队的治理工具**——应用团队没法通过改自己的 YAML 来"抢"这些资源，因为默认情况下它们根本调度不上去。
+**这就是 `taint` 的典型用法：把一台机器"保留"给特定用途**（GPU 节点、专用数据库节点、控制平面）。它是**平台团队的治理工具**——应用团队没法通过改自己的 YAML 来"抢"这些资源，因为默认情况下它们根本调度不上去。
 
-### 第八步：清理
+#### 第八步：清理
 
 ```bash
 kubectl delete pods -n cloudnote -l purpose=chapter-10-demo --ignore-not-found
@@ -934,16 +909,14 @@ kubectl delete pod taint-tolerated -n cloudnote --ignore-not-found
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 10.9 本章要点
 
 1. **`requests` 是"预留"（调度器用它），`limits` 是"天花板"（kubelet 用它）。**只写 `limits` 会让 `requests` 被默认设成同样的值，导致调度过度保守。
 2. **CPU 是可压缩资源，内存是不可压缩资源。**所以 CPU 超限只是**被限流变慢**（静默、无事件、`RESTARTS` 不变），内存超限会被 **OOMKilled** 直接杀掉。**CPU 限流是这一章最隐蔽的问题。**
 3. **QoS 等级由 `requests` / `limits` 的关系自动推导，它决定的不是"性能"，而是"被驱逐的优先级"**：`BestEffort` → `Burstable` → `Guaranteed`。**故意让离线任务成为 BestEffort，是一种设计。**
 4. **控制 Pod 位置有四个工具、两个方向**：`nodeSelector` / `nodeAffinity` 是 **Pod 挑节点**；`taints` + `tolerations` 是**节点拒绝 Pod**；`podAffinity` 管 Pod 之间的关系。**而打散副本，优先用 `topologySpreadConstraints`**——它比 `podAntiAffinity.required` 优雅得多。
 
-### 一张图收尾
+#### 本章全景图
 
 ```
  你在 YAML 里写的一行数字                    K8s 用它做三件事
@@ -963,44 +936,22 @@ kubectl delete pod taint-tolerated -n cloudnote --ignore-not-found
    Pod 之间：podAffinity · podAntiAffinity · topologySpreadConstraints
 ```
 
-### 自测题
+### 10.10 练习题
 
-1. `requests` 和 `limits` 分别被谁使用、在什么时候使用？（积木 10-1）
-2. **只写 `limits` 会发生什么？**会带来什么后果？（积木 10-1）
-3. `resources` 是每个 Pod 的还是每个容器的？有 init 容器时调度怎么算？（积木 10-1）
-4. 为什么 CPU 超限只是变慢，内存超限却会被杀死？（积木 10-2）
-5. CPU 限流为什么"很难被发现"？该监控什么指标？（积木 10-2）
-6. Java 服务"本地跑得好好的，进容器就 OOMKilled"，最可能的原因是什么？怎么修？（积木 10-2）
-7. "容器被 OOMKilled"和"Pod 被 Evicted"有什么本质区别？（积木 10-2、10-4）
-8. QoS 三个等级的判定条件分别是什么？它决定了什么？（积木 10-3）
-9. 为什么"把所有服务都设成 Guaranteed"不是好策略？（积木 10-3）
-10. 节点内存压力上升时，kubelet 按什么顺序驱逐 Pod？（积木 10-3、10-4）
-11. `nodeAffinity` 里的 `IgnoredDuringExecution` 是什么意思？改了节点标签能把 Pod 推走吗？（积木 10-5）
-12. `nodeSelector` 和 `taints` 在"方向"上有什么本质区别？这个区别在团队分工上意味着什么？（积木 10-5）
-13. `podAntiAffinity` 里的 `topologyKey` 是干什么的？不写会怎样？（积木 10-5）
-14. **3 个副本、只有 2 个节点时，`podAntiAffinity.required` 和 `topologySpreadConstraints` 分别会怎样？**（积木 10-5、10-6）
-15. `maxSkew` 和 `whenUnsatisfiable` 分别控制什么？（积木 10-6）
-16. 为什么推荐"可用区用 `DoNotSchedule`、节点用 `ScheduleAnyway`"？（积木 10-6）
-17. `LimitRange` 和 `ResourceQuota` 分别解决什么问题？为什么多人集群里前者几乎是必需品？（积木 10-7）
-
-### 下一章预告
-
-**第 11 章：自愈的真相 —— 探针与故障恢复**
-
-这一章一直反复出现一个词："自愈"。第 1 章说它是调和循环的功劳，第 2 章说裸 Pod 没有自愈能力，第 5 章说就绪探针是滚动更新的刹车，第 6 章说 Pod 不 Ready 会被移出 Service 后端。
-
-**但我们从来没正面回答过：K8s 到底能修哪些故障，不能修哪些？**
-
-这一章会把"自愈"这个词彻底拆开：
-
-> 三种探针（`liveness` / `readiness` / `startup`）分别解决什么问题？**配错了会怎样把整个服务搞挂？**
->
-> 容器是"假死"（死锁、内存泄漏到卡住）时，K8s 怎么发现？**进程还在跑但服务已经不响应了，谁来救？**
->
-> 一个真实的排错过程：**一个探针配置错误，如何导致所有副本同时重启、服务彻底不可用**（这是最容易自己制造的全站故障）。
->
-> 还有那个经典问题：`restartPolicy: Always` 和 Deployment 的重建，到底哪个在"重启"我的 Pod？
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 11 章。*
+1. `requests` 和 `limits` 分别被谁使用、在什么时候使用？
+2. **只写 `limits` 会发生什么？**会带来什么后果？
+3. `resources` 是每个 Pod 的还是每个容器的？有 init 容器时调度怎么算？
+4. 为什么 CPU 超限只是变慢，内存超限却会被杀死？
+5. CPU 限流为什么"很难被发现"？该监控什么指标？
+6. Java 服务"本地跑得好好的，进容器就 OOMKilled"，最可能的原因是什么？怎么修？
+7. "容器被 OOMKilled"和"Pod 被 Evicted"有什么本质区别？
+8. QoS 三个等级的判定条件分别是什么？它决定了什么？
+9. 为什么"把所有服务都设成 Guaranteed"不是好策略？
+10. 节点内存压力上升时，kubelet 按什么顺序驱逐 Pod？
+11. `nodeAffinity` 里的 `IgnoredDuringExecution` 是什么意思？改了节点标签能把 Pod 推走吗？
+12. `nodeSelector` 和 `taints` 在"方向"上有什么本质区别？这个区别在团队分工上意味着什么？
+13. `podAntiAffinity` 里的 `topologyKey` 是干什么的？不写会怎样？
+14. **3 个副本、只有 2 个节点时，`podAntiAffinity.required` 和 `topologySpreadConstraints` 分别会怎样？**
+15. `maxSkew` 和 `whenUnsatisfiable` 分别控制什么？
+16. 为什么推荐"可用区用 `DoNotSchedule`、节点用 `ScheduleAnyway`"？
+17. `LimitRange` 和 `ResourceQuota` 分别解决什么问题？为什么多人集群里前者几乎是必需品？

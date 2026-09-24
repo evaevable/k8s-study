@@ -1,21 +1,14 @@
 # 第 9 章　数据要持久：Volume、PV、PVC、StorageClass
 
-> **本章导读**
-> - 建议用时：60 分钟（含 25 分钟动手）
-> - 前置知识：第 2 章（Pod 是一次性的）、第 4 章（ownerReference 与级联删除）、第 8 章（ConfigMap 卷）
-> - 读完你应该能回答四个问题：
->   1. **Volume / PV / PVC / StorageClass 各解决什么问题？**为什么要有四层，不能直接挂一个目录吗？
->   2. `accessModes` 里的 **`ReadWriteOnce` 到底是"一个 Pod"还是"一个节点"**？（这是最普遍的误解）
->   3. 为什么会有"PVC 一直是 `Pending`，Pod 调度不上去"这种经典故障？
->   4. **删 PVC 会删掉真实数据吗？**（答案会让你重新审视备份）
+配置问题解决之后，CloudNote 还有一个更要命的问题悬而未决：`postgres` 里的用户笔记究竟存在哪里。
 
-配置解决了，但 CloudNote 最要命的问题还悬着——**`postgres` 里的用户笔记存在哪？**
+第 2 章说明过，`emptyDir` 的生命周期跟随 Pod，Pod 一删，里面的数据随之消失。而用户笔记不能丢。容器天生是易失的、会漂移的，持久化因此不能交给容器自己，必须由集群提供一层与 Pod 生命周期解耦的抽象。
 
-第 2 章我们讲过：`emptyDir` 随 Pod 生命周期，**Pod 一删，里面什么都没了**。而用户笔记不能丢。
+本章沿着这层抽象自下而上展开：从 Volume 的几种类型，到 PV 与 PVC 的"供给—申请"模型，再到 StorageClass 的动态供给，最后给出把有状态服务放上 Kubernetes 时的两条红线。
 
 ---
 
-## 【积木 9-1】先看清容器文件系统的三层"寿命"
+### 9.1 先看清容器文件系统的三层"寿命"
 
 要理解为什么需要一套复杂的存储抽象，先把"数据能活多久"这件事拆成三层。
 
@@ -23,7 +16,7 @@
 flowchart TB
     L1["① 容器可写层<br/>容器重启就清空"] --> L2["② Pod 级卷（emptyDir）<br/>Pod 重建就清空"]
     L2 --> L3["③ 节点级目录（hostPath）<br/>Pod 漂到别的节点就找不到"]
-    L3 --> L4["④ 我们需要的东西<br/>与 Pod 和节点都无关"]
+    L3 --> L4["④ 真正需要的形态<br/>与 Pod 和节点都无关"]
 ```
 
 | 层次 | 数据的寿命 | 什么时候丢 |
@@ -31,15 +24,15 @@ flowchart TB
 | **容器可写层**（第 2 章讲过） | 跟随**容器** | 容器重启就没了 |
 | **`emptyDir`** | 跟随 **Pod** | Pod 被删除 / 重建 / 驱逐就没了 |
 | **`hostPath`** | 跟随**节点** | Pod 被调度到别的节点，就找不到数据了 |
-| **我们需要的东西** | **独立于 Pod 和节点** | 只有主动删才没 |
+| **真正需要的形态** | **独立于 Pod 和节点** | 只有主动删才没 |
 
 **核心矛盾在这里**：
 
-> **Pod 是"易失的、会漂移的"**（第 2 章：Pod 是一次性的；第 10 章会讲调度到哪台机器是不确定的）
->
-> **而数据必须是"不易失的、位置固定的"**
->
-> **两个性质相反的东西，怎么接起来？**
+**Pod 是"易失的、会漂移的"**（第 2 章：Pod 是一次性的；第 10 章会讲调度到哪台机器是不确定的）
+
+**而数据必须是"不易失的、位置固定的"**
+
+**两个性质相反的东西，怎么接起来？**
 
 K8s 的答案不是"让 Pod 别漂"，而是**把存储抽出来，做成一个独立的、有自己生命周期的对象**，然后让 Pod 去"认领"它。
 
@@ -47,7 +40,7 @@ K8s 的答案不是"让 Pod 别漂"，而是**把存储抽出来，做成一个�
 
 ---
 
-## 【积木 9-2】Volume：一个被误解的名字
+### 9.2 Volume：一个被误解的名字
 
 先纠正一个常见的直觉。**K8s 里的 Volume 不是"一块磁盘"，而是"一个可以被挂载到容器里的目录"。**
 
@@ -67,7 +60,7 @@ K8s 的答案不是"让 Pod 别漂"，而是**把存储抽出来，做成一个�
 ```
 数据在 Pod 里   → Pod 死了就没了
 数据在节点上   → 节点换了就没了
-数据在外部存储 → 只有你主动删才没   ← 我们要的
+数据在外部存储 → 只有你主动删才没   ← 目标形态
 ```
 
 按用途可以分成三类：
@@ -80,9 +73,9 @@ K8s 的答案不是"让 Pod 别漂"，而是**把存储抽出来，做成一个�
 
 ---
 
-## 【积木 9-3】`emptyDir`：用对了很好，用错了很惨
+### 9.3 `emptyDir`：用对了很好，用错了很惨
 
-第 2 章我们用它给主容器和边车共享日志目录。但它的边界必须记牢。
+第 2 章用它给主容器和边车共享日志目录。但它的边界必须记牢。
 
 ```yaml
 volumes:
@@ -91,7 +84,7 @@ volumes:
       sizeLimit: 500Mi        # 建议设上限，否则可能写满节点磁盘
 ```
 
-### 它适合什么
+#### 它适合什么
 
 | 场景 | 为什么合适 |
 |---|---|
@@ -105,13 +98,13 @@ volumes:
 volumes:
   - name: fast-scratch
     emptyDir:
-      medium: Memory          # ⚠️ 占用的是内存限额，会算进 Pod 的 memory limit
+      medium: Memory          #  占用的是内存限额，会算进 Pod 的 memory limit
       sizeLimit: 256Mi
 ```
 
-> **注意**：`medium: Memory` 的 emptyDir **会计入容器的内存用量**。用得不好会直接把 Pod 撑到 `OOMKilled`——这是个隐蔽的坑。
+**注意**：`medium: Memory` 的 emptyDir **会计入容器的内存用量**。用得不好会直接把 Pod 撑到 `OOMKilled`——这是个隐蔽的坑。
 
-### 它绝对不适合什么
+#### 它绝对不适合什么
 
 | 场景 | 后果 |
 |---|---|
@@ -119,10 +112,10 @@ volumes:
 | 用户上传的文件 | 同上 |
 | 任何"重新生成代价很高"的东西 | 一次节点驱逐就全没了 |
 
-> **一句话判据**：**问自己"如果这份数据明天早上消失，我能接受吗？"**
-> 能接受 → `emptyDir`；不能 → 必须用 PVC。
+**一句话判据**：**问自己"如果这份数据明天早上消失，我能接受吗？"**
+能接受 → `emptyDir`；不能 → 必须用 PVC。
 
-### 一个容易被忽略的行为
+#### 一个容易被忽略的行为
 
 `emptyDir` 的默认存储介质是**节点磁盘**（不是内存）。但它有个微妙之处：
 
@@ -133,7 +126,7 @@ volumes:
 
 ---
 
-## 【积木 9-4】`hostPath`：为什么它是"反模式"
+### 9.4 `hostPath`：为什么它是"反模式"
 
 新手最自然的想法是："Pod 换节点找不到数据？那我挂到**某台固定节点**的目录上不就行了？"
 
@@ -157,7 +150,7 @@ volumes:
 
 **它是"把节点当成存储"的思路，而 K8s 的核心假设恰恰是"节点是会坏的、可替换的"。**
 
-### 什么时候它还能用
+#### 什么时候它还能用
 
 | 场景 | 说明 |
 |---|---|
@@ -165,7 +158,7 @@ volumes:
 | **单节点学习环境** | 明确知道只有一台机器 |
 | **CNI / CSI 插件自己的配置目录** | 系统组件的特殊需求 |
 
-### 比它好的替代：Local PV
+#### 比它好的替代：Local PV
 
 如果你确实需要"高性能 + 数据留在这台机器"（比如本地 SSD 上的数据库），用 **`local` 类型的 PV**：
 
@@ -192,15 +185,15 @@ spec:
 
 **关键差别**：`hostPath` 的节点绑定是**隐式**的（调度器不知道），而 local PV 通过 `nodeAffinity` **显式声明**——调度器会把 Pod 调度到正确的节点，或者干脆不调度（而不是调过去之后才发现没数据）。
 
-> **这体现了一个通用的设计原则**：**约束必须"显式声明"给系统，而不是藏在宿主机目录里。**这也是整章都在重复的主题。
+**这体现了一个通用的设计原则**：**约束必须"显式声明"给系统，而不是藏在宿主机目录里。**这也是整章都在重复的主题。
 
 ---
 
-## 【积木 9-5】三层抽象：PV 和 PVC 到底是谁写给谁的
+### 9.5 三层抽象：PV 和 PVC 到底是谁写给谁的
 
 这是本章的核心。用**租房**来类比最清楚。
 
-### 三个角色
+#### 三个角色
 
 ```mermaid
 flowchart TB
@@ -224,7 +217,7 @@ flowchart TB
 | **PV** | **存储管理员 / 自动创建** | 「一套真实的房子」 | **集群级** |
 | **StorageClass** | **集群管理员** | 「房源模板 / 中介」 | 集群级 |
 
-### 为什么要"需求"和"供给"分开
+#### 为什么要"需求"和"供给"分开
 
 这是 K8s 存储设计最关键的一步。想想如果不分开会怎样：
 
@@ -258,7 +251,7 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 
 > **在"使用者"和"实现"之间插一层抽象，让使用者只声明"我要什么"，而不是"用哪个"。**
 
-### 绑定（Binding）是怎么发生的
+#### 绑定（Binding）是怎么发生的
 
 ```
 ① PVC 创建 → 状态 Pending
@@ -271,17 +264,17 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 ④ 找不到 → 一直 Pending，Pod 也调度不上去
 ```
 
-**"PVC 一直 Pending"是存储类故障里最常见的一种**，积木 9-7 会讲两种典型原因。
+**"PVC 一直 Pending"是存储类故障里最常见的一种**，第 9.7 节会讲两种典型原因。
 
 ---
 
-## 【积木 9-6】`accessModes` 的真相：`ReadWriteOnce` 不是"一个 Pod"
+### 9.6 `accessModes` 的真相：`ReadWriteOnce` 不是"一个 Pod"
 
 **这是 K8s 存储里最普遍的误解，没有之一。**
 
 很多资料（包括不少正式教程）都会告诉你：
 
-> "`ReadWriteOnce` = 只能被一个 Pod 挂载。"
+"`ReadWriteOnce` = 只能被一个 Pod 挂载。"
 
 **这是错的。**准确的含义是：
 
@@ -292,19 +285,19 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 | `ReadWriteMany` | RWX | 可以被"多个节点"以读写方式挂载 |
 | `ReadWriteOncePod` | **RWOP** | **只能被"一个 Pod"挂载**（这才是"单 Pod"） |
 
-### 关键差异：节点的粒度 vs Pod 的粒度
+#### 关键差异：节点的粒度 vs Pod 的粒度
 
 ```
         ReadWriteOnce（RWO）：按「节点」限制
   ┌──────────────────────────────────────────┐
   │  Node-1                                  │
   │   ├─ Pod A  ─┐                           │
-  │   ├─ Pod B  ─┼─► 都挂同一个 RWO 卷 ✅     │
+  │   ├─ Pod B  ─┼─► 都挂同一个 RWO 卷      │
   │   └─ Pod C  ─┘    （同一节点，允许）      │
   └──────────────────────────────────────────┘
   ┌──────────────────────────────────────────┐
   │  Node-2                                  │
-  │   └─ Pod D  ────► ❌ 不允许（跨节点）      │
+  │   └─ Pod D  ────►  不允许（跨节点）      │
   └──────────────────────────────────────────┘
 
 
@@ -314,7 +307,7 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 
 **所以"RWO 看起来像一个 Pod"的错觉，是因为在典型的"一个 Pod 一个节点"部署里，这两者恰好重合了。**
 
-### 一个真实的踩坑场景
+#### 一个真实的踩坑场景
 
 ```yaml
 # 你以为：滚动更新时新 Pod 起了、旧 Pod 还没删 → 两个 Pod 抢同一个 RWO 卷会失败
@@ -324,12 +317,12 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 
 **而如果用了 `RWOP`**，这种情况下新 Pod **一定**会一直等旧 Pod 释放——这反而可能是你想要的保护（避免两个进程同时写同一份数据）。
 
-> **实践建议**：
-> - 数据库这类"同时只能有一个进程写"的场景，用 **`ReadWriteOnce`** 就够了，因为你有意让它单副本
-> - 需要严格"单 Pod 独占"（比如某些文件系统不允许同机多挂载），用 **`ReadWriteOncePod`**
-> - 需要多副本同时读写（共享上传目录、多副本缓存），**必须用 `ReadWriteMany`——而且要先确认你的存储后端支持它**
+**实践建议**：
+- 数据库这类"同时只能有一个进程写"的场景，用 **`ReadWriteOnce`** 就够了，因为你有意让它单副本
+- 需要严格"单 Pod 独占"（比如某些文件系统不允许同机多挂载），用 **`ReadWriteOncePod`**
+- 需要多副本同时读写（共享上传目录、多副本缓存），**必须用 `ReadWriteMany`——而且要先确认你的存储后端支持它**
 
-### RWX 的现实限制
+#### RWX 的现实限制
 
 **块存储（云盘、EBS、云硬盘）不支持 RWX。**这是很多人的期望落差来源：
 
@@ -341,13 +334,13 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 
 **所以"我想让 web 的两个副本共享上传目录"这个需求，如果底层是云盘，是做不到的。**要么换成文件存储类后端，要么改用对象存储（S3 / OSS / COS），要么让应用自己走数据库。
 
-> 顺带说明：`accessModes` 是**存储能力声明**，不是 K8s 主动施加的限制。也就是说：**声明 RWO 并不代表 K8s 会阻止两个 Pod 挂载它**（那取决于底层存储驱动）。把它理解为"我对这个卷的访问需求说明"更准确。
+顺带说明：`accessModes` 是**存储能力声明**，不是 K8s 主动施加的限制。也就是说：**声明 RWO 并不代表 K8s 会阻止两个 Pod 挂载它**（那取决于底层存储驱动）。把它理解为"我对这个卷的访问需求说明"更准确。
 
 ---
 
-## 【积木 9-7】StorageClass：让存储"动态供给"
+### 9.7 StorageClass：让存储"动态供给"
 
-### 静态供给 vs 动态供给
+#### 静态供给 vs 动态供给
 
 **静态供给（老方式）**：
 
@@ -370,9 +363,9 @@ provisioner: driver.longhorn.io     # 或 ebs.csi.aws.com / diskplugin.csi.aliba
 
 **这一步的意义和 Deployment 取代"手工建 Pod"是一模一样的：**
 
-> **从"预分配资源"变成"按需声明 + 自动供给"。**
+**从"预分配资源"变成"按需声明 + 自动供给"。**
 
-### 一个 StorageClass 的关键字段
+#### 一个 StorageClass 的关键字段
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -385,16 +378,16 @@ provisioner: ebs.csi.aws.com        # 谁来真正创建存储
 parameters:                         # 传给 provisioner 的参数
   type: gp3
   fsType: ext4
-reclaimPolicy: Delete               # ⚠️ 删除 PVC 时怎么处理底层存储
-volumeBindingMode: WaitForFirstConsumer   # ⭐ 重要，见下
+reclaimPolicy: Delete               #  删除 PVC 时怎么处理底层存储
+volumeBindingMode: WaitForFirstConsumer   #  重要，见下
 allowVolumeExpansion: true          # 允许在线扩容
 ```
 
-### ⭐ `volumeBindingMode`：一个字段解决一类经典故障
+####  `volumeBindingMode`：一个字段解决一类经典故障
 
 | 值 | 行为 | 问题 |
 |---|---|---|
-| `Immediate` | PVC 一创建**立刻**创建卷 | ⚠️ 卷被创建在**某个可用区**，但 Pod 可能被调度到**另一个可用区** → **Pod 卡在 `ContainerCreating`，永远起不来** |
+| `Immediate` | PVC 一创建**立刻**创建卷 |  卷被创建在**某个可用区**，但 Pod 可能被调度到**另一个可用区** → **Pod 卡在 `ContainerCreating`，永远起不来** |
 | **`WaitForFirstConsumer`**（推荐） | **等第一个用到它的 Pod 被调度后**，再在**该 Pod 所在的拓扑位置**创建卷 | 自然对齐，不会跨可用区 |
 
 **这就是那个经典故障的根因**：
@@ -411,13 +404,13 @@ kubelet 挂不上卷 → Pod 卡在 ContainerCreating
 
 **用 `WaitForFirstConsumer` 就彻底不会发生**——它让"卷的位置"跟着"Pod 的位置"走。
 
-> **现在就可以看看自己集群的默认 StorageClass 用的是哪个模式**：
-> ```bash
-> kubectl get storageclass -o custom-columns='NAME:.metadata.name,PROVISIONER:.provisioner,RECLAIM:.reclaimPolicy,BINDING:.volumeBindingMode,DEFAULT:.metadata.annotations.storageclass\.kubernetes\.io/is-default-class'
-> ```
-> kind / minikube 里的 `standard`（`rancher.io/local-path`）用的就是 `WaitForFirstConsumer`——因为它本质是本地磁盘，必须知道 Pod 落在哪个节点。
+**现在就可以看看自己集群的默认 StorageClass 用的是哪个模式**：
+```bash
+kubectl get storageclass -o custom-columns='NAME:.metadata.name,PROVISIONER:.provisioner,RECLAIM:.reclaimPolicy,BINDING:.volumeBindingMode,DEFAULT:.metadata.annotations.storageclass\.kubernetes\.io/is-default-class'
+```
+kind / minikube 里的 `standard`（`rancher.io/local-path`）用的就是 `WaitForFirstConsumer`——因为它本质是本地磁盘，必须知道 Pod 落在哪个节点。
 
-### `reclaimPolicy`：这一行值不值得你记住？
+#### `reclaimPolicy`：这一行值不值得你记住？
 
 **值得。因为它是数据丢失的头号原因。**
 
@@ -426,7 +419,7 @@ kubelet 挂不上卷 → Pod 卡在 ContainerCreating
 | **`Delete`**（动态供给的默认值） | **底层存储一起被删除** | 无状态应用的临时数据、可以重新生成的数据 |
 | `Retain` | **只解绑，底层存储和数据保留** | **数据库、任何不能丢的数据** |
 
-> **⚠️ 这是本章最需要记住的一句话**：
+> ** 这是本章最需要记住的一句话**：
 >
 > **动态供给的 StorageClass 默认 `reclaimPolicy: Delete`。这意味着"删掉一个 PVC 对象"会真的删掉你的数据。**
 >
@@ -438,9 +431,9 @@ kubelet 挂不上卷 → Pod 卡在 ContainerCreating
 |---|---|
 | 数据库用 `Retain` 策略的 StorageClass | 删 PVC 后数据还在，需要人工清理 |
 | **RBAC 限制 `delete pvc` 权限** | 让删除 PVC 变成一个需要特批的动作（第 15 章） |
-| **有独立于 K8s 的备份** | 积木 9-9 会讲——这是最后一道防线 |
+| **有独立于 K8s 的备份** | 第 9.9 节会讲——这是最后一道防线 |
 
-### PVC 的"保护锁"：finalizer
+#### PVC 的"保护锁"：finalizer
 
 好消息是 K8s 内置了防误删机制：
 
@@ -455,7 +448,7 @@ kubectl describe pvc postgres-data -n cloudnote | grep Finalizers
 
 ---
 
-## 【积木 9-8】一个完整的 PVC 用法
+### 9.8 一个完整的 PVC 用法
 
 现在把零件拼起来。CloudNote 的 `postgres` 需要一份持久存储：
 
@@ -486,7 +479,7 @@ spec:
       image: postgres:16-alpine
       env:
         - name: PGDATA
-          value: /var/lib/postgresql/data/pgdata   # ⚠️ 必须放在子目录，原因见下
+          value: /var/lib/postgresql/data/pgdata   #  必须放在子目录，原因见下
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -501,7 +494,7 @@ spec:
         claimName: postgres-data      # ← 引用 PVC，不关心底层是什么
 ```
 
-### 三个值得单独讲的细节
+#### 三个值得单独讲的细节
 
 **① 观察它从 Pending 到 Bound**
 
@@ -539,7 +532,7 @@ postgres 报错：data directory is not empty
 
 **解法就是设 `PGDATA=/var/lib/postgresql/data/pgdata`**——让 postgres 用挂载卷里的一个子目录，父目录非空就不影响了。
 
-> 这是个通用的经验：**数据库挂载持久卷时，永远给数据目录留一层子目录。**MySQL、MongoDB 都有类似的坑。
+这是个通用的经验：**数据库挂载持久卷时，永远给数据目录留一层子目录。**MySQL、MongoDB 都有类似的坑。
 
 **③ 删 Pod 不会删 PVC**
 
@@ -551,11 +544,11 @@ kubectl get pvc postgres-data -n cloudnote
 
 **PVC 还在，数据还在。**重建 Pod、重新挂载，数据就回来了。
 
-> 这个行为和 ConfigMap 不同：**PVC 不是 Pod 的"附属物"，它是一个独立生命周期的对象。**这正是它能跨越 Pod 重建的原因。
->
-> （而如果你用 Deployment 管有状态服务，Pod 模板里的 `claimName` 是固定的，所以所有副本会抢同一个 PVC——这是第 13 章要引入 StatefulSet 的原因。）
+这个行为和 ConfigMap 不同：**PVC 不是 Pod 的"附属物"，它是一个独立生命周期的对象。**这正是它能跨越 Pod 重建的原因。
 
-### 扩容
+（而如果你用 Deployment 管有状态服务，Pod 模板里的 `claimName` 是固定的，所以所有副本会抢同一个 PVC——这是第 13 章要引入 StatefulSet 的原因。）
+
+#### 扩容
 
 ```bash
 # 前提：StorageClass 要 allowVolumeExpansion: true
@@ -571,11 +564,11 @@ kubectl get pvc postgres-data -n cloudnote -w
 
 ---
 
-## 【积木 9-9】数据安全的三条红线
+### 9.9 数据安全的三条红线
 
 存储这块是"一失手成千古恨"的重灾区。把红线列清楚。
 
-### 红线一：`Delete` 是动态供给的默认回收策略
+#### 红线一：`Delete` 是动态供给的默认回收策略
 
 | 你做的事 | 实际发生的事 |
 |---|---|
@@ -597,13 +590,13 @@ allowVolumeExpansion: true
 
 **代价**：删 PVC 后 PV 会变成 `Released` 状态，需要人工清理。但对数据库来说，这个"麻烦"是必要的。
 
-### 红线二：**持久化不等于备份**
+#### 红线二：**持久化不等于备份**
 
 这是最需要纠正的观念：
 
-> **PVC 让数据在 Pod 重建、节点故障时活下来，但它完全不能防"人为误删"。**
->
-> 而且如果 PVC 和它保护的数据在同一个存储系统里，**存储系统本身故障或遭勒索加密时，数据会一起完蛋**。
+**PVC 让数据在 Pod 重建、节点故障时活下来，但它完全不能防"人为误删"。**
+
+而且如果 PVC 和它保护的数据在同一个存储系统里，**存储系统本身故障或遭勒索加密时，数据会一起完蛋**。
 
 **备份必须是"独立于 K8s 存储体系"的**：
 
@@ -616,7 +609,7 @@ allowVolumeExpansion: true
 
 **一句话**：**一个只存在于集群内的备份，不算备份。**
 
-### 红线三：有状态应用"上 K8s"之前先想清楚
+#### 红线三：有状态应用"上 K8s"之前先想清楚
 
 | 问题 | 为什么重要 |
 |---|---|
@@ -625,13 +618,13 @@ allowVolumeExpansion: true
 | 副本间怎么复制？ | K8s 不知道你的数据库怎么选主，得靠 Operator 或 StatefulSet + 应用自身 |
 | 备份在哪？谁验证过能恢复？ | **没验证过的备份等于没有备份** |
 
-> **一个务实的建议**：**先把无状态服务（`web` / `api` / `worker`）迁上 K8s，有状态的部分（数据库、消息队列）优先用云托管服务。**等团队熟悉了 K8s 的存储模型、搞定了备份验证，再考虑把有状态组件迁进来。
->
-> 这不保守——这是**按风险排序**。
+**一个务实的建议**：**先把无状态服务（`web` / `api` / `worker`）迁上 K8s，有状态的部分（数据库、消息队列）优先用云托管服务。**等团队熟悉了 K8s 的存储模型、搞定了备份验证，再考虑把有状态组件迁进来。
+
+这不保守——这是**按风险排序**。
 
 ---
 
-## 【积木 9-10】动手：一个 A/B 实验看清 PVC 和 emptyDir 的差别
+### 9.10 动手：一个 A/B 实验看清 PVC 和 emptyDir 的差别
 
 这是本章最值得做的实验：**完全相同的操作，一个用 PVC、一个用 emptyDir，看数据命运的分岔。**
 
@@ -643,7 +636,7 @@ bash cases/cloudnote/tools/storage-lab.sh
 
 手动流程：
 
-### 第一步：先看看集群的存储类
+#### 第一步：先看看集群的存储类
 
 ```bash
 kubectl get storageclass
@@ -652,7 +645,7 @@ kubectl get storageclass -o yaml | head -30
 
 在 kind / minikube 里你会看到 `standard`，`PROVISIONER` 是 `rancher.io/local-path`。**重点看 `volumeBindingMode` 和 `reclaimPolicy`**。
 
-### 第二步：创建一个 A/B 对照环境
+#### 第二步：创建一个 A/B 对照环境
 
 ```bash
 kubectl apply -f cases/cloudnote/00-namespace.yaml
@@ -669,7 +662,7 @@ kubectl get pv | grep pvc-
 | `data-demo-pvc` | **PVC（1Gi，动态供给）** | `/data` |
 | `data-demo-emptydir` | **emptyDir** | `/data` |
 
-### 第三步：往两边写数据
+#### 第三步：往两边写数据
 
 ```bash
 kubectl exec data-demo-pvc -n cloudnote -- sh -c 'echo "这条数据很重要 - 来自 PVC" > /data/important.txt; ls -l /data/'
@@ -679,7 +672,7 @@ kubectl exec data-demo-emptydir -n cloudnote -- sh -c 'echo "这条数据很重�
 
 **两边都有文件了。**
 
-### 第四步：把两个 Pod 都删掉
+#### 第四步：把两个 Pod 都删掉
 
 ```bash
 kubectl delete pod data-demo-pvc data-demo-emptydir -n cloudnote
@@ -688,7 +681,7 @@ kubectl get pvc -n cloudnote
 
 **关键观察**：`data-demo` 这个 PVC **还在**（Bound 状态），而 emptyDir 背后的东西（节点上的临时目录）**随 Pod 一起消失了**。
 
-### 第五步：重建两个 Pod，对比结果
+#### 第五步：重建两个 Pod，对比结果
 
 ```bash
 kubectl apply -f cases/cloudnote/45-pvc-demo.yaml
@@ -716,12 +709,12 @@ kubectl logs data-demo-emptydir -n cloudnote
 
 | Pod | `/data/important.txt` |
 |---|---|
-| **`data-demo-pvc`** | **还在！内容完整** ✅ |
-| **`data-demo-emptydir`** | **不存在** ❌ |
+| **`data-demo-pvc`** | **还在！内容完整**  |
+| **`data-demo-emptydir`** | **不存在**  |
 
 **这一个对比，就是"持久化"这三个字的全部含义。**
 
-### 第六步：验证 PVC 是真的被回收了（认识 `Delete` 策略）
+#### 第六步：验证 PVC 是真的被回收了（认识 `Delete` 策略）
 
 ```bash
 # 记下当前 PV
@@ -736,9 +729,9 @@ kubectl get pv | grep pvc- || echo "PV 已被删除（reclaimPolicy: Delete）"
 
 **如果这是生产库，你的数据在这一刻就没了。**把这个感受记住。
 
-> 想体验 `Retain` 的差别，可以自己建一个 `reclaimPolicy: Retain` 的 StorageClass，用 `storageClassName` 指定它，再做一遍这个实验——你会看到 PVC 删了，但 **PV 还在、状态变成 `Released`**，而且**数据真的还在**（`Retain` 的 PV 需要人工清理才能重新使用）。
+想体验 `Retain` 的差别，可以自己建一个 `reclaimPolicy: Retain` 的 StorageClass，用 `storageClassName` 指定它，再做一遍这个实验——你会看到 PVC 删了，但 **PV 还在、状态变成 `Released`**，而且**数据真的还在**（`Retain` 的 PV 需要人工清理才能重新使用）。
 
-### 第七步：观察一次"动态供给"
+#### 第七步：观察一次"动态供给"
 
 ```bash
 # 再建一个 PVC，然后盯着事件看 provisioner 干活
@@ -769,7 +762,7 @@ Provisioning succeeded
 
 **这是又一个"看起来像故障、实际是设计"的例子。**
 
-### 第八步：验证扩容
+#### 第八步：验证扩容
 
 ```bash
 kubectl patch pvc probe-pvc -n cloudnote \
@@ -788,16 +781,14 @@ kubectl delete pvc probe-pvc data-demo -n cloudnote --ignore-not-found
 
 ---
 
-## 【本章小结】
-
-### 四句话总结
+### 9.11 本章要点
 
 1. **Volume 是"一个可挂载的目录"，不是"一块磁盘"。**判断它的可靠性，只看一件事：**数据实际存在哪**（Pod 内 / 节点上 / 外部存储）。
 2. **PV 和 PVC 是"供给"与"需求"的分层**：应用只写 PVC 声明"我要什么"，完全不知道底层是 NFS 还是云盘。这是第 6 章 Service 解耦思路的复用。**StorageClass 让存储可以按需动态供给**，取代了"管理员预先建一堆 PV"的老方式。
 3. **`ReadWriteOnce` 是"一个节点"，不是"一个 Pod"。**要严格的单 Pod 独占得用 `ReadWriteOncePod`。而 **`ReadWriteMany` 不是所有后端都支持**（块存储就不支持）。
 4. **动态供给的默认 `reclaimPolicy` 是 `Delete`——删 PVC 会删掉真实数据。**而**持久化不等于备份**，真正的备份必须独立于 K8s 存储体系。
 
-### 一张图收尾
+#### 本章全景图
 
 ```mermaid
 flowchart TB
@@ -810,41 +801,21 @@ flowchart TB
     PV -.->|"reclaimPolicy: Retain 时<br/>只解绑，数据保留"| Y["需要人工清理"]
 ```
 
-### 自测题
+### 9.12 练习题
 
-1. 容器可写层、`emptyDir`、`hostPath` 三者的数据分别在什么时候丢失？（积木 9-1）
-2. K8s 里的 Volume 准确来说是什么？判断它的可靠性看哪一件事？（积木 9-2）
-3. `emptyDir` 的默认存储介质是什么？`medium: Memory` 有什么副作用？（积木 9-3）
-4. `hostPath` 有哪五个坑？（积木 9-4）
-5. Local PV 比 `hostPath` 好在哪一点上？这体现了什么通用设计原则？（积木 9-4）
-6. PV、PVC、StorageClass 分别由谁创建？各自的作用域是什么？（积木 9-5）
-7. 为什么要把"存储需求"和"存储供给"分成两个对象？不分会有什么问题？（积木 9-5）
-8. **`ReadWriteOnce` 的准确含义是什么？同一节点上的两个 Pod 能同时挂同一个 RWO 卷吗？跨节点呢？**（积木 9-6）
-9. 哪种 accessMode 才是真正的"单 Pod 独占"？什么场景需要它？（积木 9-6）
-10. `ReadWriteMany` 有哪些后端能支持？云盘（块存储）支持吗？（积木 9-6）
-11. `volumeBindingMode: Immediate` 会导致什么经典故障？`WaitForFirstConsumer` 怎么避免它？（积木 9-7）
-12. 单独创建一个 PVC、没有 Pod 用它时，为什么它会一直 `Pending`？（积木 9-7、9-10）
-13. **删除 PVC 会删除真实数据吗？**取决于哪个字段？（积木 9-7、9-9）
-14. `kubernetes.io/pvc-protection` 这个 finalizer 保护了什么？它保护不了什么？（积木 9-7）
-15. postgres 挂载持久卷时为什么要把 `PGDATA` 设成子目录？（积木 9-8）
-16. 为什么说"持久化不等于备份"？一个合格的备份必须满足什么条件？（积木 9-9）
-
-### 下一章预告
-
-**第 10 章：调度与资源管理 —— requests、limits、QoS、亲和性**
-
-存储解决了。现在回头看一个被我们跳过很久的问题——**调度器凭什么决定 Pod 去哪个节点？**
-
-第 3 章讲过 Scheduler 的两个阶段（Filter / Score），但当时是"看别人干活"。这一章我们要**反过来控制它**：
-
-> `requests` 和 `limits` 到底有什么区别？**为什么只写 `limits` 会让调度器瞎猜，甚至让整个服务崩掉？**
->
-> 什么情况下 Pod 会被 **OOMKilled**？`QoS` 的三个等级（Guaranteed / Burstable / BestEffort）是谁决定的、决定了什么？
->
-> 怎么让两个副本**强制分散到不同节点**（第 2 章埋的那个"两个副本都在同一台机器上，挂一个节点就全挂"的坑）？
->
-> `nodeSelector` / `nodeAffinity` / `podAntiAffinity` / `taints & tolerations` 分别解决什么问题、什么时候该用哪个？
-
----
-
-*学完本章，回到对话里说一句「继续」，我就开讲第 10 章。*
+1. 容器可写层、`emptyDir`、`hostPath` 三者的数据分别在什么时候丢失？
+2. K8s 里的 Volume 准确来说是什么？判断它的可靠性看哪一件事？
+3. `emptyDir` 的默认存储介质是什么？`medium: Memory` 有什么副作用？
+4. `hostPath` 有哪五个坑？
+5. Local PV 比 `hostPath` 好在哪一点上？这体现了什么通用设计原则？
+6. PV、PVC、StorageClass 分别由谁创建？各自的作用域是什么？
+7. 为什么要把"存储需求"和"存储供给"分成两个对象？不分会有什么问题？
+8. **`ReadWriteOnce` 的准确含义是什么？同一节点上的两个 Pod 能同时挂同一个 RWO 卷吗？跨节点呢？**
+9. 哪种 accessMode 才是真正的"单 Pod 独占"？什么场景需要它？
+10. `ReadWriteMany` 有哪些后端能支持？云盘（块存储）支持吗？
+11. `volumeBindingMode: Immediate` 会导致什么经典故障？`WaitForFirstConsumer` 怎么避免它？
+12. 单独创建一个 PVC、没有 Pod 用它时，为什么它会一直 `Pending`？
+13. **删除 PVC 会删除真实数据吗？**取决于哪个字段？
+14. `kubernetes.io/pvc-protection` 这个 finalizer 保护了什么？它保护不了什么？
+15. postgres 挂载持久卷时为什么要把 `PGDATA` 设成子目录？
+16. 为什么说"持久化不等于备份"？一个合格的备份必须满足什么条件？
